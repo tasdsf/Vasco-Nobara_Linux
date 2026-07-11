@@ -292,11 +292,12 @@ def solicitar_docking():
                     permissao_concedida = True
                     break
                 elif 'DockingDenied' in eventos_nomes:
-                    print("[ERRO] Pedido negado pela torre (Estação cheia/Fila).")
-                    pydirectinput.press('x') 
-                    pydirectinput.press('tab') 
-                    time.sleep(15.0)
-                    break
+                    # Antes disparava boost ('tab') às cegas para tentar recuperar --
+                    # perigoso desnecessariamente com a nave possivelmente apontada
+                    # à estação. Preferimos parar e pedir intervenção manual do que
+                    # arriscar uma colisão a tentar um recovery automático.
+                    abortar_com_erro("Docking negado pela torre (estação cheia/fila). "
+                                      "Intervenção manual necessária.")
                 time.sleep(0.5)
 
             if permissao_concedida:
