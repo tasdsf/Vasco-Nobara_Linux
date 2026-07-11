@@ -30,7 +30,7 @@ os.makedirs(pasta_logs, exist_ok=True)
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
 # com o prefixo errado no log partilhado).
 _logger = logging.getLogger("comprar")
-_logger.setLevel(logging.ERROR)
+_logger.setLevel(logging.INFO)
 if not _logger.handlers:
     _fh = logging.FileHandler(os.path.join(pasta_logs, "r2d2_combined.log"), encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(asctime)s - [COMPRAR] - %(levelname)s - %(message)s'))
@@ -263,13 +263,15 @@ def fase_3_comprar_item():
         time.sleep(0.5)
         
     print("\n>>> FASE 3: Procurando rare goods...")
+    _logger.info("Selecionou a lista de rare goods (tecla 'd').")
     time.sleep(2.0)
     pydirectinput.press('d')
     time.sleep(0.5)
-    
-    for i in range(40): 
+
+    for i in range(40):
         if procurar_template(templates['rare_on'], "RARE FOUND", MONITOR_MARKET, 0.80):
             print(">>> ITEM DETETADO! Comprando...")
+            _logger.info("Detetou o item (Fujin Tea / Kamitra Cigars) no mercado.")
             pydirectinput.press('space')
             time.sleep(1.0)
             pydirectinput.keyDown('d')
@@ -283,9 +285,14 @@ def fase_3_comprar_item():
             ancora_journal = obter_tamanho_atual_log()
             pydirectinput.press('space')
             print("\n[DEBUG] comprou <space>")
+            _logger.info("Comprou -- carregou no SPACE para confirmar a compra.")
             time.sleep(2.0)
 
             compra_confirmada = aguardar_confirmacao_compra(ancora_journal)
+            if compra_confirmada:
+                _logger.info("Compra confirmada pelo journal (MarketBuy detetado).")
+            else:
+                _logger.warning("Compra NÃO confirmada pelo journal dentro do tempo limite.")
 
             for _ in range(3):
                 pydirectinput.press('backspace')
