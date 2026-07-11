@@ -1,0 +1,16 @@
+# segredos e config local
+.env
+.claude/
+
+# runtime / gerado
+__pycache__/
+*.pyc
+logs/
+debug/__pycache__/
+
+# arquivo morto e rascunhos (histórico agora é do git)
+bck/
+temp/
+
+# artefactos de teste visuais
+debug/*.png

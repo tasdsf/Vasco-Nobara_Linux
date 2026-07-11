@@ -1,0 +1,8 @@
+opencv-python
+numpy
+python-dotenv
+evdev
+dbus-python
+PyGObject
+psycopg2-binary
+pyttsx3

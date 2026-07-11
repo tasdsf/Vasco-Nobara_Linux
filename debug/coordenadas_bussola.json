@@ -1,0 +1,35 @@
+{
+    "Cobramkv": {
+        "MONITOR_CONFIG": {
+            "top": 1208,
+            "left": 909,
+            "width": 88,
+            "height": 98
+        },
+        "CX_NEUTRO": 44,
+        "CY_NEUTRO": 49,
+        "LIMIAR_THRESH": 84
+    },
+    "Mandalay": {
+        "MONITOR_CONFIG": {
+            "top": 1228,
+            "left": 954,
+            "width": 84,
+            "height": 94
+        },
+        "CX_NEUTRO": 42,
+        "CY_NEUTRO": 47,
+        "LIMIAR_THRESH": 162
+    },
+	"Hauler": {
+		"MONITOR_CONFIG": {
+			"top": 1210,
+			"left": 918,
+			"width": 90,
+			"height": 100
+		},
+		"CX_NEUTRO": 47,
+		"CY_NEUTRO": 48,
+		"LIMIAR_THRESH": 130
+	}
+}

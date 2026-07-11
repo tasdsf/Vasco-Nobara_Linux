@@ -1,0 +1,57 @@
+{
+    "Mandalay": {
+        "MONITOR_CONFIG": {
+            "top": 1228,
+            "left": 954,
+            "width": 84,
+            "height": 94
+        },
+        "CX_NEUTRO": 42,
+        "CY_NEUTRO": 47,
+        "LIMIAR_THRESH": 162
+    },
+    "Hauler": {
+        "MONITOR_CONFIG": {
+            "top": 1210,
+            "left": 918,
+            "width": 90,
+            "height": 100
+        },
+        "CX_NEUTRO": 47,
+        "CY_NEUTRO": 48,
+        "LIMIAR_THRESH": 130
+    },
+    "Cobra Mk V": {
+        "MONITOR_CONFIG": {
+            "top": 847,
+            "left": 669,
+            "width": 72,
+            "height": 82
+        },
+        "CX_NEUTRO": 36,
+        "CY_NEUTRO": 41,
+        "LIMIAR_THRESH": 136
+    },
+    "Corsair": {
+        "MONITOR_CONFIG": {
+            "top": 850,
+            "left": 680,
+            "width": 68,
+            "height": 78
+        },
+        "CX_NEUTRO": 17,
+        "CY_NEUTRO": 14,
+        "LIMIAR_THRESH": 128
+    },
+    "Lakonminer": {
+        "MONITOR_CONFIG": {
+            "top": 853,
+            "left": 682,
+            "width": 62,
+            "height": 72
+        },
+        "CX_NEUTRO": 31,
+        "CY_NEUTRO": 36,
+        "LIMIAR_THRESH": 138
+    }
+}
