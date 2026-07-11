@@ -280,38 +280,23 @@ def solicitar_docking():
         time.sleep(1.5)
 
         if clicou:
-            print("[LOG] Validação instantânea do pipeline Request -> Granted...")
-            
-            permissao_concedida = False
-            for _ in range(8):
-                eventos_imediatos = ler_novos_eventos(ancora_log)
-                eventos_nomes = [e.get('event') for e in eventos_imediatos]
-                
-                if 'DockingGranted' in eventos_nomes:
-                    print("[SUCESSO] Pedido aceite pela torre de controlo (DockingGranted)!")
-                    permissao_concedida = True
-                    break
-                elif 'DockingDenied' in eventos_nomes:
-                    # Antes disparava boost ('tab') às cegas para tentar recuperar --
-                    # perigoso desnecessariamente com a nave possivelmente apontada
-                    # à estação. Preferimos parar e pedir intervenção manual do que
-                    # arriscar uma colisão a tentar um recovery automático.
-                    abortar_com_erro("Docking negado pela torre (estação cheia/fila). "
-                                      "Intervenção manual necessária.")
-                time.sleep(0.5)
-
-            if permissao_concedida:
-                if aguardar_confirmacao_docking(ancora_log):
-                    print("\n[SUCESSO] Operação de docking totalmente finalizada.")
-                    return True
-                else:
-                    abortar_com_erro("A manobra falhou ou foi abortada a meio do voo.")
+            # Pedido enviado: a partir daqui a nave pode entrar em manobras
+            # automáticas de aproximação (acelerações/travagens assim que o
+            # DockingComputer assume) que tornam qualquer template visual
+            # pouco fiável -- e reabrir o painel para tentar confirmar
+            # visualmente arrisca acertar sem querer no botão de pedido outra
+            # vez, o que aborta o docking a meio do percurso e deixa a nave
+            # parada até intervenção manual. Por isso, uma vez enviado o
+            # pedido, não se manda mais nenhum input: só se monitoriza o
+            # journal (Granted/Denied/Cancelled/Docked) até ao fim, em vez de
+            # reiniciar a tentativa ao fim de uma janela curta de espera.
+            print("[LOG] Pedido enviado. A monitorizar o journal até ao pouso (sem mais inputs)...")
+            if aguardar_confirmacao_docking(ancora_log):
+                print("\n[SUCESSO] Operação de docking totalmente finalizada.")
+                return True
             else:
-                msg = "[AVISO] Torre não emitiu 'Granted'. A estação pode estar cheia."
-                print(msg)
-                logging.warning(f"Tentativa {tentativa} falhou: Granted não recebido.")
-                falar(f"Docking request denied. Initiating attempt {tentativa + 1}.")
-                time.sleep(4)
+                abortar_com_erro("Pedido de docking enviado mas não confirmado (negado, cancelado ou "
+                                  "timeout à espera do pouso). Intervenção manual necessária.")
         else:
             msg = "[ERRO] Botão de request não foi localizado."
             print(msg)
