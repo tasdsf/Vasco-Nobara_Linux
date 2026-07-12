@@ -7,6 +7,7 @@ Elite Dangerous Automation with intelligent sequence handling
 import os
 import sys
 import time
+import fcntl
 import importlib
 import json
 import logging
@@ -16,6 +17,7 @@ from pathlib import Path
 from infra_bridge import keyboard
 from los_checker import calcular_espera_los
 from infra_bridge import ED_LOG_DIR
+from infra_bridge import print_ts as print
 import time
 
 # Set up logging
@@ -24,6 +26,32 @@ LOG_DIR = SCRIPT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "vasco_automated.log"
 STATE_FILE = LOG_DIR / "vasco_state.json"
+LOCK_FILE = LOG_DIR / "vasco.lock"
+
+# Referencia global so para o handle nao ser fechado pelo garbage collector --
+# e o proprio handle aberto que mantem o flock() vivo, nao o ficheiro em si.
+_lock_handle = None
+
+def adquirir_lock_unico():
+    """ Impede duas instancias do vasco.py de correrem ao mesmo tempo e
+    disputarem a mesma janela do jogo (nao ha nenhum mutex entre processos --
+    ja aconteceu ficarem 3 instancias vivas em simultaneo, dias sem ninguem
+    dar por isso, cada uma a mandar inputs por cima da outra). Usa
+    fcntl.flock() em vez de um ficheiro de PID: o kernel liberta o lock
+    sozinho quando o processo morre por qualquer razao (crash, kill -9,
+    queda de energia), sem precisar de limpeza manual de lock ficheiro
+    "orfao" -- um ficheiro de PID normal nao tem essa garantia. """
+    global _lock_handle
+    _lock_handle = open(LOCK_FILE, 'w')
+    try:
+        fcntl.flock(_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f"\n[FATAL] Já existe uma instância do vasco.py a correr "
+              f"(lock ocupado: {LOCK_FILE}). A abortar para não disputar "
+              f"a janela do jogo com o outro processo.")
+        sys.exit(1)
+    _lock_handle.write(str(os.getpid()))
+    _lock_handle.flush()
 
 def setup_logger():
     logger = logging.getLogger("vasco")
@@ -168,6 +196,8 @@ def executar_script(script_name, retry_count=3, retry_delay=5, **_ignorado):
     return False, error_msg, "MAX_RETRIES"
 
 def main():
+    adquirir_lock_unico()
+
     # 'python vasco.py a' arranca já em modo automatico, sem perguntar no 1o ciclo
     # nem em nenhum ciclo seguinte -- fica sempre em automatico, sem countdown.
     auto_via_cli = len(sys.argv) > 1 and sys.argv[1].strip().lower() == 'a'
