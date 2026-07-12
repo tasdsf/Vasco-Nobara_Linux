@@ -31,6 +31,19 @@ if not _logger.handlers:
     _logger.addHandler(_fh)
     _logger.propagate = False
 
+# Logger a parte, so para os scores do AUTO_COMPLETE aceites -- enquanto o
+# valor do template estiver "em estudo" (ver historico do threshold: 0.70 ->
+# 0.73 -> 0.89), queremos uma serie limpa de dados para decidir ate onde da
+# para descer, sem ter de garimpar isto no meio do r2d2_combined.log. So
+# regista a deteccao final que passou o threshold, nao cada poll falhado.
+_logger_calibracao = logging.getLogger("undocking.auto_complete_calibracao")
+_logger_calibracao.setLevel(logging.INFO)
+if not _logger_calibracao.handlers:
+    _fh_cal = logging.FileHandler(os.path.join(pasta_logs, "auto_complete_scores.log"), encoding='utf-8')
+    _fh_cal.setFormatter(logging.Formatter('%(asctime)s,%(message)s'))
+    _logger_calibracao.addHandler(_fh_cal)
+    _logger_calibracao.propagate = False
+
 def abortar_com_erro(mensagem):
     """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
     print(f"\n[FATAL] {mensagem}")
@@ -272,22 +285,25 @@ def executar_auto_launch():
 
     return True
 
+AUTO_COMPLETE_THRESHOLD = 0.89  # valor defensivo enquanto calibramos -- ver logs/auto_complete_scores.log
+
 def aguardar_saida_estacao():
     print("\n>>> FASE: Detetar saída da estação...")
     print("[VISÃO] A monitorizar o HUD para a notificação 'AUTO LAUNCH COMPLETE'...")
-    
+
     # Watchdog de 3 Minutos (A estação pode ter fila de trânsito)
-    timeout_saida = time.time() + 180  
-    
-    while True: 
+    timeout_saida = time.time() + 180
+
+    while True:
         if time.time() > timeout_saida:
             falar("Warning. Auto launch timeout exceeded.")
             abortar_com_erro("Timeout (180s) à espera de sair da estação. A nave está presa no trânsito?")
 
-        encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, 0.89)
+        encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, AUTO_COMPLETE_THRESHOLD)
         if encontrou:
             print(f"\n>>> [VISÃO] Notificação detetada com {score*100:.1f}% de precisão!")
-            _logger.info(f"AUTO_COMPLETE detetado com {score*100:.1f}% de precisao (threshold 73%).")
+            _logger.info(f"AUTO_COMPLETE detetado com {score*100:.1f}% de precisao (threshold {AUTO_COMPLETE_THRESHOLD*100:.0f}%).")
+            _logger_calibracao.info(f"{score*100:.2f},{AUTO_COMPLETE_THRESHOLD*100:.0f}")
             print("[LOG] Saída da estação confirmada.")
             break
         time.sleep(0.4)
