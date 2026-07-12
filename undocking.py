@@ -1,11 +1,13 @@
 import os
 import sys
 import time
+import glob
+import json
 import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss
+from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print, ED_LOG_DIR
 import time
 
 # ==========================================
@@ -20,7 +22,9 @@ os.makedirs(pasta_logs, exist_ok=True)
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
 # com o prefixo errado no log partilhado).
 _logger = logging.getLogger("undocking")
-_logger.setLevel(logging.ERROR)
+# INFO por causa do registo do score do AUTO_COMPLETE (unico caso de uso
+# nao-ERROR neste logger) -- ver aguardar_saida_estacao().
+_logger.setLevel(logging.INFO)
 if not _logger.handlers:
     _fh = logging.FileHandler(os.path.join(pasta_logs, "r2d2_combined.log"), encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(asctime)s - [UNDOCKING] - %(levelname)s - %(message)s'))
@@ -84,6 +88,43 @@ def focar_jogo_seguro():
 # ==========================================
 MONITOR_MENU = {"top": 770, "left": 800, "width": 330, "height": 300}
 MONITOR_CORNER = {"top": 50, "left": 1400, "width": 500, "height": 300}
+
+LOG_DIR = ED_LOG_DIR
+
+def get_latest_log():
+    list_of_files = glob.glob(os.path.join(LOG_DIR, 'Journal.*.log'))
+    if not list_of_files: return None
+    return max(list_of_files, key=os.path.getctime)
+
+def obter_tamanho_atual_log():
+    latest_log = get_latest_log()
+    if not latest_log: return 0
+    try:
+        return os.path.getsize(latest_log)
+    except:
+        return 0
+
+def ler_novos_eventos(posicao_ancora):
+    latest_log = get_latest_log()
+    if not latest_log: return []
+    try:
+        tamanho_atual = os.path.getsize(latest_log)
+        if tamanho_atual <= posicao_ancora:
+            return []
+        with open(latest_log, 'r', encoding='utf-8') as f:
+            f.seek(posicao_ancora)
+            linhas_novas = f.readlines()
+        eventos = []
+        for linha in linhas_novas:
+            try:
+                data = json.loads(linha)
+                if 'event' in data:
+                    eventos.append(data)
+            except: continue
+        return eventos
+    except Exception as e:
+        print(f"[ERRO] Falha ao ler stream de logs: {e}")
+        return []
 
 pasta_imagens = os.path.join(diretorio_atual, 'images')
 
@@ -243,9 +284,10 @@ def aguardar_saida_estacao():
             falar("Warning. Auto launch timeout exceeded.")
             abortar_com_erro("Timeout (180s) à espera de sair da estação. A nave está presa no trânsito?")
 
-        encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, 0.7)
+        encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, 0.73)
         if encontrou:
             print(f"\n>>> [VISÃO] Notificação detetada com {score*100:.1f}% de precisão!")
+            _logger.info(f"AUTO_COMPLETE detetado com {score*100:.1f}% de precisao (threshold 73%).")
             print("[LOG] Saída da estação confirmada.")
             break
         time.sleep(0.4)
@@ -263,6 +305,30 @@ def sequencia_salto():
     pydirectinput.press('x')
     time.sleep(8.0)
 
+def aguardar_no_fire_zone_exit(ancora_log, timeout=60):
+    """ Gate final antes de entregar o controlo ao OLHO: a deteção visual do
+    AUTO_COMPLETE (acima) pode dar falso positivo -- já aconteceu a nave ficar
+    presa junto ao pad com o HUD a bater ruído nos 70%+ e a manobra seguir em
+    frente na mesma. Este evento vem do próprio Journal do jogo, por isso não
+    há como fingir: só avançamos quando o jogo confirma "No fire zone exited".
+    Se a nave estiver mesmo presa em trânsito (raro), abortamos como qualquer
+    outra falha desta máquina de estados -- não vale a pena complicar com
+    lógica de recuperação para um caso raro; aceitar o prejuízo e deixar o
+    'a' (modo automático) tentar de novo é mais barato. """
+    print(f"\n>>> FASE: A confirmar saída da no-fire-zone via Journal (timeout {timeout}s)...")
+    timeout_real = time.time() + timeout
+
+    while time.time() < timeout_real:
+        for evento in ler_novos_eventos(ancora_log):
+            if evento.get('event') == 'ReceiveText' and evento.get('Message') == '$STATION_NoFireZone_exited;':
+                print("[OK] 'No fire zone exited' confirmado pelo Journal.")
+                _logger.info("No fire zone exited confirmado -- handoff para OLHO autorizado.")
+                return True
+        time.sleep(0.5)
+
+    falar("Warning. Still inside station no fire zone.")
+    abortar_com_erro("Timeout à espera de 'No fire zone exited' no Journal. A nave pode estar presa/bloqueada perto da estação.")
+
 # ==========================================
 # 4. EXECUÇÃO PRINCIPAL
 # ==========================================
@@ -272,10 +338,13 @@ def executar():
     print("O R2D2 assume os comandos em 1 segundos...")
     time.sleep(1)
 
+    ancora_log = obter_tamanho_atual_log()
+
     sucesso_execucao = executar_auto_launch()
     if sucesso_execucao:
         aguardar_saida_estacao()
         sequencia_salto()
+        aguardar_no_fire_zone_exit(ancora_log)
 
     if VISUAL_DEBUG:
         cv2.destroyAllWindows()
