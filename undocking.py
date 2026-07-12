@@ -284,7 +284,7 @@ def aguardar_saida_estacao():
             falar("Warning. Auto launch timeout exceeded.")
             abortar_com_erro("Timeout (180s) à espera de sair da estação. A nave está presa no trânsito?")
 
-        encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, 0.73)
+        encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, 0.89)
         if encontrou:
             print(f"\n>>> [VISÃO] Notificação detetada com {score*100:.1f}% de precisão!")
             _logger.info(f"AUTO_COMPLETE detetado com {score*100:.1f}% de precisao (threshold 73%).")
