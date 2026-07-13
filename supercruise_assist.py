@@ -199,6 +199,7 @@ def iniciar_salto_seguro():
     # 1. Verifica se está a carregar
     if bool(flags & STATUS_FLAGS["FSD_CHARGING"]):
         print("[OK] Motor FSD em carga confirmada pela telemetria.")
+        registar_los_visivel_auto()
         # Espera o salto acontecer (ex: 8s)
         pydirectinput.press('x')
         time.sleep(4.5)
@@ -221,6 +222,32 @@ def iniciar_salto_seguro():
         
     pydirectinput.press('x')
     abortar_com_erro("Destino fisicamente obstruído por corpo celeste (Planeta/Estrela) nas costas.")
+
+def registar_los_visivel_auto():
+    """ Um salto de supercruise iniciado com sucesso implica que o alvo
+    estava VISÍVEL (sem planeta no meio) e a nave ainda está junto à
+    estação/carrier de partida -- é uma observação LOS 'visivel' de boa
+    qualidade para alimentar o auto-fit (fase+período) do checker. Reusa
+    registar_observacao()/obter_sistema_atual() do los_checker.py (mesma
+    ligação à BD, mesma deteção de sistema pelo journal, já testadas) em
+    vez de duplicar essa lógica aqui. Nunca pode partir o voo: qualquer
+    falha aqui é só reportada e ignorada. """
+    try:
+        from los_checker import obter_sistema_atual, registar_observacao
+
+        sistema = obter_sistema_atual(LOG_DIR)
+        if not sistema:
+            print("[LOS-AUTO] Sistema desconhecido -- observacao nao registada.")
+            return
+
+        registar_observacao(
+            sistema, "visivel",
+            "automatica: salto supercruise iniciado com sucesso em modo auto "
+            "(pelo sim pelo nao: pode ter tido ajuda do utilizador)",
+            origem="auto-linux"
+        )
+    except Exception as e:
+        print(f"[LOS-AUTO] Falha ao registar observacao (ignorada, o voo continua): {e}")
 
 def aguardar_supercruise_confirmado(timeout=30):
     """Confirma pela telemetria (Status.json, flag SUPERCRUISE=0x10) que já
