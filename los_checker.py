@@ -234,12 +234,17 @@ def _garantir_tabela(cur):
             timestamp_utc TIMESTAMPTZ NOT NULL,
             estado TEXT NOT NULL CHECK (estado IN ('visivel', 'oclusos')),
             nota TEXT,
-            criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+            criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+            origem TEXT NOT NULL DEFAULT 'linux'
         )
     """)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_los_observacoes_sistema
         ON los_observacoes(sistema)
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_los_observacoes_sistema_ts_estado
+        ON los_observacoes (sistema, timestamp_utc, estado)
     """)
 
 
@@ -268,7 +273,11 @@ def _carregar_observacoes_bd(sistema):
     return observacoes
 
 
-def registar_observacao(sistema, estado, nota=""):
+def registar_observacao(sistema, estado, nota="", origem="auto-linux"):
+    """ origem distingue quem gravou a observação: 'linux' é o humano a
+    calibrar via los_calibrar.py / CLI interativa; 'auto-linux' (default)
+    fica reservado para quando o próprio vasco.py vier a registar
+    observações de forma automática, sem input humano. """
     if estado not in ("visivel", "oclusos"):
         raise ValueError("estado tem de ser 'visivel' ou 'oclusos'")
     agora = datetime.now(timezone.utc)
@@ -277,15 +286,15 @@ def registar_observacao(sistema, estado, nota=""):
         with conn.cursor() as cur:
             _garantir_tabela(cur)
             cur.execute(
-                "INSERT INTO los_observacoes (sistema, timestamp_utc, estado, nota) "
-                "VALUES (%s, %s, %s, %s)",
-                (sistema, agora, estado, nota)
+                "INSERT INTO los_observacoes (sistema, timestamp_utc, estado, nota, origem) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (sistema, agora, estado, nota, origem)
             )
             conn.commit()
     finally:
         conn.close()
     print(f"[LOS] Observação registada: sistema={sistema} estado={estado} "
-          f"timestamp={agora.strftime('%Y-%m-%dT%H:%M:%S')}Z")
+          f"timestamp={agora.strftime('%Y-%m-%dT%H:%M:%S')}Z origem={origem}")
 
 
 def _alertar_falha_bd(erro):
@@ -380,7 +389,7 @@ if __name__ == "__main__":
             print("[ERRO] Não foi possível determinar o sistema atual pelo journal.")
             sys.exit(1)
         try:
-            registar_observacao(sistema_cli, estado_cli, nota_cli)
+            registar_observacao(sistema_cli, estado_cli, nota_cli, origem="linux")
         except Exception as e:
             _alertar_falha_bd(e)
             sys.exit(1)
