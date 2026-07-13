@@ -94,7 +94,9 @@ templates_nomes = {
     'station': 'STATION.png',
     'station_alt': 'STATION1.png',
     'locked': 'LOCKED_DESTINATION.png',
-    'unlocked': 'UNLOCKED_DESTINATION.png'
+    'unlocked': 'UNLOCKED_DESTINATION.png',
+    'confirma_carrier': 'carrier_destination_confirm.png',
+    'confirma_station': 'futen_destination_check.png'
 }
 
 templates = {}
@@ -309,6 +311,23 @@ def marcar_destino_dinamico():
         # Não lança erro fatal aqui porque o jogo às vezes ofusca o botão com partículas holográficas
         print(f"[AVISO] Não foi possível validar visualmente o Lock no {label_alvo}. Assumindo sucesso cego.")
         pydirectinput.press('space')
+
+    # Verificação final por NOME (não só o ícone genérico STATION/CARRIER):
+    # já aconteceu o "sucesso" ser reportado com o carrier a continuar como
+    # alvo de HUD e de rota -- os popups LOCKED/UNLOCKED são genéricos e não
+    # garantem QUAL alvo ficou realmente trancado, e o jogo não grava nenhum
+    # evento no journal quando se tranca um alvo pelo painel local. Por isso
+    # confirma-se aqui, lendo o nome do alvo agora trancado, antes de fechar
+    # o painel -- se não bater certo, pede-se intervenção humana em vez de
+    # assumir sucesso às cegas.
+    if tipo_alvo == "station":
+        template_confirma, nome_confirma = templates['confirma_station'], "FUTEN SPACEPORT"
+    else:
+        template_confirma, nome_confirma = templates['confirma_carrier'], "CARRIER (ZAHIR W6G-26N)"
+
+    if not procurar_template(template_confirma, f"CONFIRMA {nome_confirma}", MONITOR_PANEL, 0.80):
+        abortar_com_erro(f"Alvo trancado não confere com '{nome_confirma}' esperado para {label_alvo} -- "
+                          f"possível seleção incorreta (ex: manteve o alvo anterior). Intervenção manual necessária.")
 
     pydirectinput.press('1') # Fecha o painel
     time.sleep(1.0)
