@@ -1,10 +1,12 @@
 import os
 import sys
 import time
+import glob
+import json
 import logging
 import cv2
 import numpy as np
-from infra_bridge import pydirectinput, gw, winsound, mss
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR
 import time
 
 if sys.platform == "win32":
@@ -28,7 +30,7 @@ os.makedirs(pasta_logs, exist_ok=True)
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
 # com o prefixo errado no log partilhado).
 _logger = logging.getLogger("comprar")
-_logger.setLevel(logging.ERROR)
+_logger.setLevel(logging.INFO)
 if not _logger.handlers:
     _fh = logging.FileHandler(os.path.join(pasta_logs, "r2d2_combined.log"), encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(asctime)s - [COMPRAR] - %(levelname)s - %(message)s'))
@@ -120,6 +122,65 @@ except Exception as e:
     abortar_com_erro(f"Falha ao carregar imagens para a memória: {e}")
 
 # ==========================================
+# 1b. CONFIRMAÇÃO DA COMPRA VIA JOURNAL DO JOGO
+# ==========================================
+# Mesmos tipos internos aceites pelo vender.py -- só um dos dois está
+# disponível para compra de cada vez.
+TIPOS_RARE_ACEITES = {"fujintea", "kamitracigars"}
+
+def get_latest_log():
+    list_of_files = glob.glob(os.path.join(ED_LOG_DIR, 'Journal.*.log'))
+    if not list_of_files: return None
+    return max(list_of_files, key=os.path.getmtime)
+
+def obter_tamanho_atual_log():
+    latest_log = get_latest_log()
+    if not latest_log: return 0
+    try:
+        return os.path.getsize(latest_log)
+    except Exception:
+        return 0
+
+def ler_novos_eventos(posicao_ancora):
+    latest_log = get_latest_log()
+    if not latest_log: return []
+    try:
+        tamanho_atual = os.path.getsize(latest_log)
+        if tamanho_atual <= posicao_ancora:
+            return []
+        with open(latest_log, 'r', encoding='utf-8') as f:
+            f.seek(posicao_ancora)
+            linhas_novas = f.readlines()
+        eventos = []
+        for linha in linhas_novas:
+            try:
+                data = json.loads(linha)
+                if 'event' in data:
+                    eventos.append(data)
+            except Exception:
+                continue
+        return eventos
+    except Exception:
+        return []
+
+def aguardar_confirmacao_compra(posicao_ancora, timeout=30):
+    """ Confirma a compra pelo evento MarketBuy real do journal, em vez de
+    confiar só na sequência visual de teclas/templates -- sem isto, um menu
+    dessincronizado ou compra recusada fica por detetar e a nave segue com
+    o porão vazio. """
+    print("[LOG] A confirmar a compra pelo journal do jogo...")
+    limite = time.time() + timeout
+    while time.time() < limite:
+        for evento in ler_novos_eventos(posicao_ancora):
+            if evento.get('event') == 'MarketBuy' and evento.get('Type', '').lower() in TIPOS_RARE_ACEITES:
+                print(f"[OK] Compra confirmada pelo journal: {evento.get('Type_Localised')} "
+                      f"x{evento.get('Count')} por {evento.get('TotalCost')} CR")
+                return True
+        time.sleep(0.5)
+    print("[AVISO] Compra não confirmada pelo journal dentro do tempo limite.")
+    return False
+
+# ==========================================
 # 2. MOTOR DE VISÃO
 # ==========================================
 def procurar_template(template, nome_label, monitor, threshold=0.80):
@@ -202,13 +263,15 @@ def fase_3_comprar_item():
         time.sleep(0.5)
         
     print("\n>>> FASE 3: Procurando rare goods...")
+    _logger.info("Selecionou a lista de rare goods (tecla 'd').")
     time.sleep(2.0)
     pydirectinput.press('d')
     time.sleep(0.5)
-    
-    for i in range(40): 
+
+    for i in range(40):
         if procurar_template(templates['rare_on'], "RARE FOUND", MONITOR_MARKET, 0.80):
             print(">>> ITEM DETETADO! Comprando...")
+            _logger.info("Detetou o item (Fujin Tea / Kamitra Cigars) no mercado.")
             pydirectinput.press('space')
             time.sleep(1.0)
             pydirectinput.keyDown('d')
@@ -218,13 +281,25 @@ def fase_3_comprar_item():
             pydirectinput.press('s')
             print("\n[DEBUG] desceu <s>")
             time.sleep(1.0)
+
+            ancora_journal = obter_tamanho_atual_log()
             pydirectinput.press('space')
             print("\n[DEBUG] comprou <space>")
+            _logger.info("Comprou -- carregou no SPACE para confirmar a compra.")
             time.sleep(2.0)
-            
+
+            compra_confirmada = aguardar_confirmacao_compra(ancora_journal)
+            if compra_confirmada:
+                _logger.info("Compra confirmada pelo journal (MarketBuy detetado).")
+            else:
+                _logger.warning("Compra NÃO confirmada pelo journal dentro do tempo limite.")
+
             for _ in range(3):
                 pydirectinput.press('backspace')
                 time.sleep(0.8)
+
+            if not compra_confirmada:
+                return "FALHA_CONFIRMACAO"
             return "COMPRADO"
         
         # Este template é válido de falhar se o item estiver esgotado (lógica de negócio normal)
@@ -259,7 +334,13 @@ def executar_ciclo_completo():
                 if resultado == "COMPRADO":
                     print("\n>>> OPERAÇÃO CONCLUÍDA COM SUCESSO! <<<")
                     return True
-                
+
+                elif resultado == "FALHA_CONFIRMACAO":
+                    print("\n[REPETIR] Compra não confirmada pelo journal (menu dessincronizado?). "
+                          "A tentar de novo...")
+                    time.sleep(5.0)
+                    continue
+
                 elif resultado == "NAO_ENCONTRADO":
                     print("\n[REPETIR] Item esgotado. Saindo e aguardando 2 minutos...")
                     # Clica no Exit que já está selecionado

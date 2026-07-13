@@ -9,7 +9,7 @@ import glob
 from collections import deque
 import sys
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, SCREEN_WIDTH, SCREEN_HEIGHT
+from infra_bridge import pydirectinput, gw, winsound, mss, SCREEN_WIDTH, SCREEN_HEIGHT, print_ts as print
 
 
 if sys.platform == "win32":
@@ -87,10 +87,10 @@ def focar_jogo_seguro():
         janelas = gw.getWindowsWithTitle("Elite - Dangerous (CLIENT)")
         if not janelas:
             janelas = gw.getWindowsWithTitle("Elite Dangerous")
-            
+
         if janelas:
             janela_elite = janelas[0]
-            janela_elite.activate() 
+            janela_elite.activate()
             time.sleep(1.0) # Tempo vital para o DWM renderizar a janela à frente
             print("[OK] Acesso biométrico ao cockpit estabelecido.")
             return True
@@ -143,16 +143,21 @@ BOT_ATIVO = True
 
 DEAD_ZONE_BUSSOLA = 2
 RAIO_AJUSTE_FINO = 12
-IMPULSO_BUSSOLA = 0.25
+IMPULSO_BUSSOLA = 0.22
 TOLERANCIA_BOLA = 3.5
 
 # Mantidos os teus valores de calibração fina atualizados:
 MONITOR_HUD = {"top": 402, "left": 762, "width": 359, "height": 302}
 DEAD_ZONE_HUD = 15
-IMPULSO_HUD = 0.15
+IMPULSO_HUD = 0.17
 
 historico_bola_x = deque(maxlen=5)
 historico_bola_y = deque(maxlen=5)
+
+# Throttle do TRACE de ALINHADO_MACRO -- o loop corre a ~25Hz e este ramo
+# dispara todos os ciclos quando já está centrado, inundando a consola.
+_ultimo_trace_alinhado = 0.0
+_INTERVALO_TRACE_ALINHADO = 2.0  # segundos (>10x menos que os ~0.04s do loop)
 
 caminho_memoria = os.path.join(diretorio_atual, "memoria_bussola.json")
 caminho_coordenadas = os.path.join(diretorio_atual, "coordenadas_bussola.json")
@@ -165,6 +170,11 @@ except Exception as e:
 try:
     template_alvo_hud = cv2.imread(os.path.join(pasta_imagens, "target.png"), cv2.IMREAD_COLOR)
     if template_alvo_hud is None: raise FileNotFoundError("TARGET.png ausente")
+    # Retículo do alvo é composto por dois arcos: este é o arco de baixo
+    # (sempre abaixo e à direita do arco de cima, target.png) -- serve de
+    # fallback quando um planeta/corpo celeste tapa só o arco de cima.
+    template_alvo_hud_low = cv2.imread(os.path.join(pasta_imagens, "target_low.png"), cv2.IMREAD_COLOR)
+    if template_alvo_hud_low is None: raise FileNotFoundError("target_low.png ausente")
 except Exception as e:
     abortar_com_erro(f"Erro de I/O na imagem TARGET.png: {e}")
 
@@ -251,11 +261,11 @@ def localizar_bola(img_bgr, cx, cy):
     mascara_final = np.zeros(img_hsv.shape[:2], dtype=np.uint8)
     px, py = 0, 0
     is_hollow = False
-    
+
     for perfil in memoria:
         mask = cv2.inRange(img_hsv, np.array(perfil['min']), np.array(perfil['max']))
         contornos, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         if contornos:
             ponto_contorno = max(contornos, key=cv2.contourArea)
             if cv2.contourArea(ponto_contorno) > 2:
@@ -282,7 +292,11 @@ def localizar_bola(img_bgr, cx, cy):
                         dx = px - cx
                         dy = py - cy
                         if abs(dx) <= DEAD_ZONE_BUSSOLA and abs(dy) <= DEAD_ZONE_BUSSOLA:
-                            print(f"[TRACE] bola=({px},{py}) centro=({cx},{cy}) dx={dx} dy={dy} -> ALINHADO_MACRO")
+                            global _ultimo_trace_alinhado
+                            agora_trace = time.time()
+                            if agora_trace - _ultimo_trace_alinhado >= _INTERVALO_TRACE_ALINHADO:
+                                print(f"[TRACE] bola=({px},{py}) centro=({cx},{cy}) dx={dx} dy={dy} -> ALINHADO_MACRO")
+                                _ultimo_trace_alinhado = agora_trace
                             return "ALINHADO_MACRO", (px, py), mask, abs(dx), abs(dy)
 
                         # Mapeamento derivado de testes diretos e isolados: 'w'
@@ -301,7 +315,7 @@ def localizar_bola(img_bgr, cx, cy):
                         print(f"[TRACE] bola=({px},{py}) centro=({cx},{cy}) dx={dx} dy={dy} preenchido={proporcao_preenchida:.2f} -> {prefixo}{comando}")
                         return f"{prefixo}{comando}", (px, py), mask, abs(dx), abs(dy)
                     return "AQUECENDO", (px, py), mask, 0, 0
-                    
+
     historico_bola_x.clear()
     historico_bola_y.clear()
     return "NÃO_DETETADO", None, mascara_final, 0, 0
@@ -309,23 +323,40 @@ def localizar_bola(img_bgr, cx, cy):
 def localizar_alvo_hud(sct):
     img_bgra = np.array(sct.grab(MONITOR_HUD))
     img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
-    
-    res = cv2.matchTemplate(img_bgr, template_alvo_hud, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(res)
-    
+
     cx_hud = MONITOR_HUD["width"] // 2
     cy_hud = MONITOR_HUD["height"] // 2
-    
+
+    res = cv2.matchTemplate(img_bgr, template_alvo_hud, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
     if max_val >= 0.70:
         h, w = template_alvo_hud.shape[:2]
         tx = max_loc[0] + (w // 2)
         ty = max_loc[1] + (h // 2)
-        
         dx = tx - cx_hud
         dy = ty - cy_hud
         return True, dx, dy, img_bgr, max_val
-        
-    return False, 0, 0, img_bgr, max_val
+
+    # target.png (arco de cima do retículo) pode ficar tapado por um
+    # planeta/corpo celeste sem tapar target_low.png (arco de baixo do
+    # mesmo retículo, sempre abaixo e à direita do primeiro) -- tenta esse
+    # como fallback. Só aceita se a posição bater com a geometria esperada
+    # (target_low abaixo/à direita da melhor posição vista para target.png,
+    # mesmo que essa não tenha passado o threshold), para não confundir
+    # ruído laranja solto no HUD com o retículo real.
+    res_low = cv2.matchTemplate(img_bgr, template_alvo_hud_low, cv2.TM_CCOEFF_NORMED)
+    _, max_val_low, _, max_loc_low = cv2.minMaxLoc(res_low)
+
+    if max_val_low >= 0.70 and max_loc_low[0] >= max_loc[0] and max_loc_low[1] >= max_loc[1]:
+        w = template_alvo_hud_low.shape[1]
+        tx = max_loc_low[0] + (w // 2)
+        ty = max_loc_low[1]  # topo do arco de baixo, nao o centro -- o alvo fica ACIMA do target_low, nao em cima dele
+        dx = tx - cx_hud
+        dy = ty - cy_hud
+        return True, dx, dy, img_bgr, max_val_low
+
+    return False, 0, 0, img_bgr, max(max_val, max_val_low)
 
 # ==========================================
 # 4. CONTROLADORES DE VOO CX_NEUTRO
@@ -403,10 +434,10 @@ def aplicar_manobra_bussola(comando, dist_x, dist_y, coords_bola=None):
 
 def aplicar_manobra_hud(dx, dy):
     teclas = []
-    if dy < -DEAD_ZONE_HUD: teclas.append('w') 
-    elif dy > DEAD_ZONE_HUD: teclas.append('s') 
-    if dx < -DEAD_ZONE_HUD: teclas.append('a') 
-    elif dx > DEAD_ZONE_HUD: teclas.append('d') 
+    if dy < -DEAD_ZONE_HUD: teclas.append('w')
+    elif dy > DEAD_ZONE_HUD: teclas.append('s')
+    if dx < -DEAD_ZONE_HUD: teclas.append('a')
+    elif dx > DEAD_ZONE_HUD: teclas.append('d')
 
     for t in ["w", "s", "a", "d"]:
         if t not in teclas: pydirectinput.keyUp(t)
@@ -414,9 +445,17 @@ def aplicar_manobra_hud(dx, dy):
     if teclas:
         print(f"[INFO] IMPULSO_HUD: {teclas}") # CORRIGIDO: Agora lista os inputs corretos
         for t in teclas: pydirectinput.keyDown(t)
-        time.sleep(IMPULSO_HUD) 
+        time.sleep(IMPULSO_HUD)
         for t in teclas: pydirectinput.keyUp(t)
         time.sleep(2.0) # Mantidos os 2 segundos estruturais de estabilização
+
+def aplicar_roll_desocluir():
+    """ Pequeno impulso de roll -- não muda o rumo, só a orientação -- para
+    tentar desocluir a vista quando algo (sol/planeta/corpo celeste) está a
+    tapar a zona do HUD onde o retículo do alvo deveria aparecer. """
+    pydirectinput.keyDown('q')
+    time.sleep(0.5)
+    pydirectinput.keyUp('q')
 
 # ==========================================
 # 5. EXECUÇÃO PRINCIPAL
@@ -428,56 +467,56 @@ def executar():
     print(f"[INFO] Dados Calibracao: MONITOR_CONFIG: {MONITOR_CONFIG}\n    CX_NEUTRO: {CX_NEUTRO} CY_NEUTRO: {CY_NEUTRO}")
 
     tempo_inicio_centrado = None
-    TEMPO_ESTABILIDADE_FINAL = 3.0 
+    TEMPO_ESTABILIDADE_FINAL = 3.0
     tempo_cego = None
     LIMITE_CEGO = 30.0
     tempo_inicio_manobra = time.time()
     LIMITE_MANOBRA = 180.0
 
     inicializar_infraestrutura()
-    
+
     print(f"\n==================================================")
     print(f"R2D2 Sniper v11 - Pipeline de Orientação")
     print(f"Módulo de Prioridade Dinâmica | Nave: {nave_ativa}")
     print("==================================================\n")
     print("Armando loop fechado em 1 segundo...")
     time.sleep(1)
-    
+
     with mss.mss() as sct:
         try: monitor_jogo = sct.monitors[1]
         except: monitor_jogo = sct.monitors[0]
-            
+
         area_bussola = {
             "top": monitor_jogo["top"] + MONITOR_CONFIG["top"],
             "left": monitor_jogo["left"] + MONITOR_CONFIG["left"],
             "width": MONITOR_CONFIG["width"], "height": MONITOR_CONFIG["height"]
         }
-        
+
         while True:
             if keyboard.is_pressed('q'):
                 abortar_por_utilizador()
-                
+
             if BOT_ATIVO:
                 if time.time() - tempo_inicio_manobra > LIMITE_MANOBRA:
                     abortar_com_erro(f"Bloqueio de timeout. Manobra demorou mais de {LIMITE_MANOBRA}s.")
 
                 img_bussola = cv2.cvtColor(np.array(sct.grab(area_bussola)), cv2.COLOR_BGRA2BGR)
                 cmd_bussola, coords_bola, mask_hsv, dist_x, dist_y = localizar_bola(img_bussola, CX_NEUTRO, CY_NEUTRO)
-                
+
                 encontrou_hud, dx_hud, dy_hud, img_hud, max_val_hud = localizar_alvo_hud(sct)
-                
+
                 alvo_nas_costas = cmd_bussola.startswith("OCA:")
                 comando_display = ""
-                
+
                 if encontrou_hud and not alvo_nas_costas:
                     tempo_cego = None
                     if abs(dx_hud) <= DEAD_ZONE_HUD and abs(dy_hud) <= DEAD_ZONE_HUD:
                         comando_display = "ALVO BLOQUEADO NO HUD!"
                         largar_todas_as_teclas()
-                        
+
                         if tempo_inicio_centrado is None:
                             tempo_inicio_centrado = time.time()
-                            
+
                         if time.time() - tempo_inicio_centrado >= TEMPO_ESTABILIDADE_FINAL:
                             print("\n[SUCESSO] Vetor trancado. Coordenadas estáveis.")
                             tocar_alarme_sucesso()
@@ -487,10 +526,10 @@ def executar():
                         tempo_inicio_centrado = None
                         comando_display = f"MICRO-AJUSTE HUD (DX:{dx_hud} DY:{dy_hud})"
                         aplicar_manobra_hud(dx_hud, dy_hud)
-                        
+
                 else:
                     tempo_inicio_centrado = None
-                    
+
                     if not coords_bola:
                         comando_display = "MACRO: NÃO_DETETADO"
                         if tempo_cego is None: tempo_cego = time.time()
@@ -500,9 +539,19 @@ def executar():
                         # Muitas vezes a falha é o sol/planeta a tapar o HUD --
                         # um pequeno impulso de roll (não muda o rumo, só a
                         # orientação) pode desocluir a vista.
-                        pydirectinput.keyDown('q')
-                        time.sleep(0.5)
-                        pydirectinput.keyUp('q')
+                        aplicar_roll_desocluir()
+                    elif cmd_bussola == "ALINHADO_MACRO":
+                        # A bússola diz que o nariz já aponta ao alvo mas o HUD
+                        # não confirma nenhum dos dois arcos do retículo --
+                        # normalmente um planeta/corpo celeste a tapar
+                        # exatamente essa zona. Sem isto o loop ficava parado
+                        # (ALINHADO_MACRO não move nada) até o timeout de
+                        # LIMITE_MANOBRA. Mesmo recurso de roll do ramo
+                        # NÃO_DETETADO acima.
+                        tempo_cego = None
+                        comando_display = "MACRO: ALINHADO_MACRO (HUD tapado -- a rodar)"
+                        largar_todas_as_teclas()
+                        aplicar_roll_desocluir()
                     else:
                         tempo_cego = None
                         comando_display = f"MACRO: {cmd_bussola}"
@@ -510,20 +559,20 @@ def executar():
 
                 if VISUAL_DEBUG:
                     img_hud_bussola = img_bussola.copy()
-                    cv2.rectangle(img_hud_bussola, (CX_NEUTRO-DEAD_ZONE_BUSSOLA, CY_NEUTRO-DEAD_ZONE_BUSSOLA), 
+                    cv2.rectangle(img_hud_bussola, (CX_NEUTRO-DEAD_ZONE_BUSSOLA, CY_NEUTRO-DEAD_ZONE_BUSSOLA),
                                            (CX_NEUTRO+DEAD_ZONE_BUSSOLA, CY_NEUTRO+DEAD_ZONE_BUSSOLA), (255, 255, 255), 1)
                     cv2.circle(img_hud_bussola, (CX_NEUTRO, CY_NEUTRO), 1, (0, 165, 255), -1)
                     if coords_bola:
                         cv2.circle(img_hud_bussola, coords_bola, 3, (0, 255, 0), -1)
-                        
+
                     view_zoom = cv2.resize(img_hud_bussola, (300, 350), interpolation=cv2.INTER_NEAREST)
                     divisor = np.ones((350, 10, 3), dtype=np.uint8) * 80
-                    
+
                     cv2.putText(view_zoom, comando_display, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0) if encontrou_hud else (0, 165, 255), 1)
 
                     img_hud_debug = cv2.resize(img_hud, (550, 350))
                     cv2.putText(img_hud_debug, f"HUD MATCH: {max_val_hud*100:.1f}%", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if encontrou_hud else (0, 0, 255), 2)
-                    
+
                     if encontrou_hud:
                         cv2.putText(img_hud_debug, f"Desvio Real: DX:{dx_hud} DY:{dy_hud}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 

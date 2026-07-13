@@ -50,6 +50,11 @@ try:
 except Exception:
     winsound = None
 
+try:
+    from infra_bridge import print_ts as print
+except Exception:
+    pass
+
 
 # ==========================================
 # CONSTANTES ORBITAIS POR SISTEMA

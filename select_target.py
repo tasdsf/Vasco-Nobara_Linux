@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss
+from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print
 import time
 
 # ==========================================

@@ -191,6 +191,20 @@ def ler_novos_eventos(posicao_ancora):
     except Exception:
         return []
 
+def obter_cargo_atual():
+    """ Lê o snapshot atual do porão (Cargo.json, escrito pelo próprio jogo
+    sempre que o porão muda) -- serve para cruzar com a deteção visual antes
+    de aceitar "nada para vender". Uma única leitura visual pontual pode
+    apanhar o menu a meio de renderizar/scrollar e concluir vazio quando na
+    verdade há carga por vender. """
+    caminho = os.path.join(ED_LOG_DIR, 'Cargo.json')
+    try:
+        with open(caminho, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('Count', 0)
+    except Exception:
+        return None  # desconhecido -- não bloquear o fluxo por causa disto
+
 def aguardar_confirmacao_venda(posicao_ancora, timeout=30):
     """ Confirma a venda pelo evento MarketSell real do journal, em vez de
     confiar só na sequência visual de teclas/templates. """
@@ -244,8 +258,25 @@ def fase_2_vender_tudo():
     pydirectinput.press('space') # Seleciona aba SELL
     time.sleep(1.2)
     
-    if (procurar_template(templates['rare_not_on'], "FUJIN TEA (INV)", MONITOR_MARKET, 0.85, log_trace=True) or
-            procurar_template(templates['rare_not_on1'], "FUJIN TEA (INV) ALT", MONITOR_MARKET, 0.85, log_trace=True)):
+    item_visivel = (procurar_template(templates['rare_not_on'], "FUJIN TEA (INV)", MONITOR_MARKET, 0.85, log_trace=True) or
+                    procurar_template(templates['rare_not_on1'], "FUJIN TEA (INV) ALT", MONITOR_MARKET, 0.85, log_trace=True))
+
+    if not item_visivel:
+        # Antes de aceitar "nada para vender", cruzar com o porão real -- foi
+        # isto que faltou no incidente em que o journal tinha 23 unidades de
+        # Fujin Tea e o bot declarou VAZIO por uma leitura visual falhada.
+        cargo_atual = obter_cargo_atual()
+        if cargo_atual:
+            print(f"[AVISO] Ecrã não mostra nada para vender, mas o porão real tem "
+                  f"Cargo={cargo_atual} unidades. A repetir a deteção visual antes de desistir...")
+            time.sleep(1.5)
+            item_visivel = (procurar_template(templates['rare_not_on'], "FUJIN TEA (INV)", MONITOR_MARKET, 0.85, log_trace=True) or
+                            procurar_template(templates['rare_not_on1'], "FUJIN TEA (INV) ALT", MONITOR_MARKET, 0.85, log_trace=True))
+            if not item_visivel:
+                abortar_com_erro(f"Porão tem Cargo={cargo_atual} unidades no journal mas a interface não "
+                                  f"mostra nada para vender -- menu dessincronizado. Intervenção manual necessária.")
+
+    if item_visivel:
         print(f">>> Fujin Tea detectado no inventário!")
         pydirectinput.press('d') # Entra na lista
         time.sleep(0.5)
@@ -299,6 +330,19 @@ def fase_2_vender_tudo():
                 return "VENDIDO"
 
             if procurar_template(templates['exit_on'], "EXIT BUTTON", MONITOR_MARKET, 0.75):
+                # Chegou ao fim da lista SELL sem nunca confirmar a venda --
+                # mas o item tinha sido detetado à entrada (foi por isso que
+                # entrámos neste ramo). Cruzar com o Cargo.json antes de
+                # aceitar "nada para vender": já aconteceu perdermo-nos a
+                # scrollar e sair daqui em falso, deixando o porão cheio e o
+                # comprar.py preso depois (regra do jogo: só deixa comprar
+                # mais rares depois de vender os que já se tem).
+                cargo_atual = obter_cargo_atual()
+                if cargo_atual:
+                    pydirectinput.press('backspace')
+                    abortar_com_erro(f"Chegou ao fim da lista SELL sem confirmar venda, mas o porão "
+                                      f"real (Cargo.json) ainda tem {cargo_atual} unidades -- "
+                                      f"perdeu-se a scrollar a lista. Intervenção manual necessária.")
                 print(">>> Fim da lista. Nada encontrado para vender.")
                 pydirectinput.press('backspace')
                 return "VAZIO"
@@ -310,8 +354,9 @@ def fase_2_vender_tudo():
         abortar_com_erro("Esgotou 25 iterações na lista de venda sem sucesso. O bot perdeu-se na interface.")
 
     else:
-        # Não detetar o item logo de início não é um erro fatal (o inventário pode estar vazio)
-        print("[LOG] Item não detetado. Inventário parece vazio. A abortar venda de forma limpa.")
+        # Não detetar o item e o porão real (Cargo.json) confirmar vazio --
+        # não é um erro fatal, o inventário está mesmo vazio.
+        print("[LOG] Item não detetado e porão confirmado vazio. A abortar venda de forma limpa.")
         for _ in range(2):
             pydirectinput.press('backspace')
             time.sleep(0.8)
