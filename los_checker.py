@@ -40,6 +40,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import psycopg2
 from dotenv import load_dotenv
 
@@ -114,36 +115,31 @@ def tem_los(p_est, p_car, raio_planeta, margem_atmosfera):
 
 
 # ==========================================
-# REGRESSÃO — ajusta fase_carrier
+# REGRESSÃO — auto-fit de fase_carrier E período_carrier
 # ==========================================
-def _estado_modelo(fase_est, fase_car, epoch, t_obs, k):
-    est = EntidadeOrbital(k["semi_eixo_estacao"], k["periodo_estacao"], fase_est, epoch)
-    car = EntidadeOrbital(k["semi_eixo_carrier"], k["periodo_carrier"], fase_car, epoch)
-    return tem_los(est.pos(t_obs), car.pos(t_obs), k["raio_planeta"], k["margem_atmosfera"])
+# O período do carrier na tabela de constantes é uma medição pontual --
+# ligeiramente errado, o erro de fase acumula ao longo de vários dias de
+# observações e nenhuma fase única (com período fixo) consegue compensar
+# isso (sintoma: ajuste só-de-fase estagna nos ~85% de acerto mesmo com
+# dezenas de observações). Em vez disso, varre-se em grelha os dois
+# parâmetros em simultâneo -- mesma receita já usada no lado Windows.
+JANELA_PERIODO_PCT = 0.12    # +/-12% em torno do período constante
+PASSO_PERIODO_PCT   = 0.002  # 0.2% da janela -> 500 candidatos de período
+PASSOS_FASE          = 360   # resolução de 1°
 
 
-def _score(fase_car, observacoes, epoch, k):
-    acertos = 0
-    for obs in observacoes:
-        try:
-            t = datetime.fromisoformat(obs['timestamp_utc'])
-            estado = obs['estado']
-            if estado not in ('visivel', 'oclusos'):
-                continue
-            previsto = _estado_modelo(0.0, fase_car, epoch, t, k)
-            real = (estado == 'visivel')
-            if previsto == real:
-                acertos += 1
-        except Exception:
-            continue
-    return acertos
+def _calibrar_fase_periodo(observacoes, k):
+    """Auto-fit de 2 parâmetros (fase_carrier E periodo_carrier) por
+    varrimento em grelha contra as observações reais. Devolve
+    (epoch, fase_estacao=0.0, fase_carrier, periodo_carrier_ajustado).
 
-
-def _calibrar_fase(observacoes, k):
-    """Varre fase_carrier de 0 a 2π em passos de 1°, devolve a fase que
-    maximiza o score. Usa a observação mais antiga como epoch."""
+    Otimização: a posição da estação e o ângulo-base do carrier (sem a
+    fase) só dependem do período candidato, não da fase -- pré-calculam-se
+    uma vez por período, e a fase entra por adição de ângulos (cos/sin já
+    tabelados), sem recalcular trigonometria por cada par (período, fase).
+    """
     if not observacoes:
-        return None, 0.0, math.pi
+        return None, 0.0, math.pi, k["periodo_carrier"]
 
     timestamps = []
     for obs in observacoes:
@@ -152,30 +148,110 @@ def _calibrar_fase(observacoes, k):
         except Exception:
             continue
     if not timestamps:
-        return None, 0.0, math.pi
+        return None, 0.0, math.pi, k["periodo_carrier"]
 
     epoch = min(timestamps)
     obs_validas = [o for o in observacoes if o.get('estado') in ('visivel', 'oclusos')]
-
     if not obs_validas:
-        return epoch, 0.0, math.pi
+        return epoch, 0.0, math.pi, k["periodo_carrier"]
 
-    melhor_score  = -1
-    melhor_fase   = math.pi
-    passos        = 360  # resolução de 1°
+    # Pré-calcula, por observação: dt desde o epoch, posição da estação
+    # (fase fixa 0.0, período constante -- não faz parte do ajuste) e o
+    # estado real observado.
+    dts, est_x, est_y, reais = [], [], [], []
+    for obs in obs_validas:
+        t = datetime.fromisoformat(obs['timestamp_utc'])
+        dt = (t - epoch).total_seconds()
+        ang_est = (2 * math.pi / k["periodo_estacao"]) * dt
+        dts.append(dt)
+        est_x.append(k["semi_eixo_estacao"] * math.cos(ang_est))
+        est_y.append(k["semi_eixo_estacao"] * math.sin(ang_est))
+        reais.append(obs['estado'] == 'visivel')
 
-    for i in range(passos):
-        fase_car = (2 * math.pi * i) / passos
-        s = _score(fase_car, obs_validas, epoch, k)
-        if s > melhor_score:
-            melhor_score = s
-            melhor_fase  = fase_car
+    dts   = np.array(dts)
+    est_x = np.array(est_x)
+    est_y = np.array(est_y)
+    reais = np.array(reais, dtype=bool)
+
+    raio_bloqueio = k["raio_planeta"] + k["margem_atmosfera"]
+    a_car = k["semi_eixo_carrier"]
+    periodo_base = k["periodo_carrier"]
+
+    n_passos_periodo = int(round(1.0 / PASSO_PERIODO_PCT))
+    periodos = np.linspace(periodo_base * (1 - JANELA_PERIODO_PCT),
+                            periodo_base * (1 + JANELA_PERIODO_PCT),
+                            n_passos_periodo)
+
+    fases    = np.linspace(0.0, 2 * math.pi, PASSOS_FASE, endpoint=False)
+    cos_fase = np.cos(fases)
+    sin_fase = np.sin(fases)
+
+    def _acertos_por_fase(periodo):
+        """ Score (N observações corretas) para cada uma das PASSOS_FASE
+        fases candidatas, com este período fixo -- vetorizado. """
+        ang_base = (2 * math.pi / periodo) * dts        # (N,)
+        cos_base = np.cos(ang_base)
+        sin_base = np.sin(ang_base)
+
+        # Adição de ângulos: roda o ângulo-base pela fase candidata sem
+        # recalcular cos/sin do ângulo somado a cada combinação.
+        cos_car = cos_base[:, None] * cos_fase[None, :] - sin_base[:, None] * sin_fase[None, :]  # (N,F)
+        sin_car = sin_base[:, None] * cos_fase[None, :] + cos_base[:, None] * sin_fase[None, :]  # (N,F)
+
+        car_x = a_car * cos_car
+        car_y = a_car * sin_car
+
+        dx  = car_x - est_x[:, None]
+        dy  = car_y - est_y[:, None]
+        ddd = dx * dx + dy * dy
+        o_dot_d = (-est_x[:, None]) * dx + (-est_y[:, None]) * dy
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t_param = np.where(ddd > 0, o_dot_d / ddd, 0.0)
+
+        px = est_x[:, None] + dx * t_param
+        py = est_y[:, None] + dy * t_param
+        mag = np.sqrt(px * px + py * py)
+
+        visivel_previsto = (ddd == 0) | (t_param < 0) | (t_param > 1) | (mag > raio_bloqueio)
+        return (visivel_previsto == reais[:, None]).sum(axis=0)   # (F,)
+
+    melhor_score_global = -1
+    periodos_no_topo = []
+
+    for periodo in periodos:
+        acertos = _acertos_por_fase(periodo)
+        score = int(acertos.max())
+        if score > melhor_score_global:
+            melhor_score_global = score
+            periodos_no_topo = [float(periodo)]
+        elif score == melhor_score_global:
+            periodos_no_topo.append(float(periodo))
+
+    # Escolhe o período CENTRAL (mediana) de entre os empatados no melhor
+    # score -- o argmax salta pelas bordas do planalto e é instável de
+    # corrida para corrida; a mediana do planalto é estável.
+    periodos_no_topo.sort()
+    melhor_periodo = periodos_no_topo[len(periodos_no_topo) // 2]
+
+    # Recalcula a fase ótima especificamente para o período mediano
+    # escolhido (o planalto pode não ser perfeitamente plano em fase).
+    acertos_final = _acertos_por_fase(melhor_periodo)
+    idx_melhor = int(np.argmax(acertos_final))
+    melhor_fase  = float(fases[idx_melhor])
+    melhor_score = int(acertos_final[idx_melhor])
 
     total = len(obs_validas)
-    print(f"[LOS] Regressão: {melhor_score}/{total} observações correctas "
-          f"com fase_carrier={math.degrees(melhor_fase):.1f}°")
+    desvio_pct = (melhor_periodo - periodo_base) / periodo_base * 100.0
+    largura_planalto = len(periodos_no_topo)
 
-    return epoch, 0.0, melhor_fase
+    print(f"[LOS] Auto-fit (fase+período): {melhor_score}/{total} observações correctas")
+    print(f"[LOS]   período_carrier ajustado = {melhor_periodo:.0f}s "
+          f"({melhor_periodo/3600:.3f}h) [{desvio_pct:+.3f}% vs constante {periodo_base}s]")
+    print(f"[LOS]   fase_carrier ajustada    = {math.degrees(melhor_fase):.1f}°")
+    print(f"[LOS]   planalto no topo         = {largura_planalto}/{n_passos_periodo} "
+          f"períodos empatados (incerteza real do período)")
+
+    return epoch, 0.0, melhor_fase, melhor_periodo
 
 
 # ==========================================
@@ -346,14 +422,15 @@ def calcular_espera_los(ed_log_dir=None) -> float:
         print(f"[LOS] Sem observações registadas para '{sistema}' -- fase por defeito (180°).")
         epoch = datetime.now(timezone.utc)
         fase_est, fase_car = 0.0, math.pi
+        periodo_car = k["periodo_carrier"]
     else:
-        epoch, fase_est, fase_car = _calibrar_fase(observacoes, k)
+        epoch, fase_est, fase_car, periodo_car = _calibrar_fase_periodo(observacoes, k)
         if epoch is None:
             epoch = datetime.now(timezone.utc)
 
     agora = datetime.now(timezone.utc)
     estacao = EntidadeOrbital(k["semi_eixo_estacao"], k["periodo_estacao"], fase_est, epoch)
-    carrier = EntidadeOrbital(k["semi_eixo_carrier"], k["periodo_carrier"], fase_car, epoch)
+    carrier = EntidadeOrbital(k["semi_eixo_carrier"], periodo_car, fase_car, epoch)
 
     return _simular(estacao, carrier, agora, k)
 
