@@ -12,7 +12,7 @@ import importlib
 import json
 import logging
 import cv2
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from infra_bridge import keyboard
 from los_checker import calcular_espera_los
@@ -251,7 +251,8 @@ def main():
                 if espera and espera > 0:
                     h, resto = divmod(int(espera), 3600)
                     m, s = divmod(resto, 60)
-                    print(f"[LOS] Planeta no meio. A aguardar {h}h {m}m {s}s...")
+                    fim_espera = (datetime.now() + timedelta(seconds=espera)).strftime('%H:%M:%S')
+                    print(f"[LOS] Planeta no meio. A aguardar {h}h {m}m {s}s... (livre por volta das {fim_espera})")
                     time.sleep(espera)
             
             success, error_msg, error_code = executar_script(
