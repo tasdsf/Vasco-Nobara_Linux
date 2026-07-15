@@ -14,3 +14,4 @@ temp/
 
 # artefactos de teste visuais
 debug/*.png
+debug/debug_output/
