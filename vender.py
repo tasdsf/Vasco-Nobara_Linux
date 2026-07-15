@@ -330,6 +330,19 @@ def fase_2_vender_tudo():
                 return "VENDIDO"
 
             if procurar_template(templates['exit_on'], "EXIT BUTTON", MONITOR_MARKET, 0.75):
+                # Chegou ao fim da lista SELL sem nunca confirmar a venda --
+                # mas o item tinha sido detetado à entrada (foi por isso que
+                # entrámos neste ramo). Cruzar com o Cargo.json antes de
+                # aceitar "nada para vender": já aconteceu perdermo-nos a
+                # scrollar e sair daqui em falso, deixando o porão cheio e o
+                # comprar.py preso depois (regra do jogo: só deixa comprar
+                # mais rares depois de vender os que já se tem).
+                cargo_atual = obter_cargo_atual()
+                if cargo_atual:
+                    pydirectinput.press('backspace')
+                    abortar_com_erro(f"Chegou ao fim da lista SELL sem confirmar venda, mas o porão "
+                                      f"real (Cargo.json) ainda tem {cargo_atual} unidades -- "
+                                      f"perdeu-se a scrollar a lista. Intervenção manual necessária.")
                 print(">>> Fim da lista. Nada encontrado para vender.")
                 pydirectinput.press('backspace')
                 return "VAZIO"

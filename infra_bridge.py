@@ -9,6 +9,10 @@ Exports públicos:
     winsound        - audio beep (paplay -> aplay -> bell)
     mss             - screen capture (PipeWire via xdg-desktop-portal-kde)
     keyboard        - hotkey listener (requer grupo 'input')
+    print_ts        - print com timestamp [HH:MM:SS] -- importar como
+                      'from infra_bridge import print_ts as print' para
+                      sombrear o print nativo do módulo sem editar cada
+                      chamada individualmente
     ED_LOG_DIR      - path dos journals do Elite
     ED_STATUS_FILE  - path do Status.json do Elite
     SCREEN_BACKEND  - string de diagnóstico do backend ativo
@@ -21,11 +25,18 @@ import math
 import uuid
 import wave
 import time
+import builtins as _builtins
 import tempfile
 import threading
 import subprocess
 import numpy as np
 import subprocess as _subprocess
+
+
+def print_ts(*args, **kwargs):
+    """print com prefixo de timestamp [HH:MM:SS]. Ver nota nos exports."""
+    ts = time.strftime("%H:%M:%S")
+    _builtins.print(f"[{ts}]", *args, **kwargs)
 
 # Tabela de scancodes Linux (input-event-codes.h)
 # CRÍTICO: ydotool usa scancode, não o carácter ASCII.

@@ -39,7 +39,7 @@ def main():
     nota = input("Nota (opcional): ").strip()
 
     try:
-        registar_observacao(sistema, estado, nota)
+        registar_observacao(sistema, estado, nota, origem="linux")
     except Exception as e:
         _alertar_falha_bd(e)
         return
