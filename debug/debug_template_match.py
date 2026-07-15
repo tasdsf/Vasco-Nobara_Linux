@@ -4,22 +4,22 @@ debug_template_match.py
 
 Script de diagnóstico para a PR #7 (select-target-name-confirm).
 
-Testa se os templates 'confirma_station' (futen_destination_check.png) e
-'confirma_carrier' (carrier_destination_confirm.png) fazem match contra
-a região MONITOR_PANEL do ecrã, e mostra:
-  - confiança do match (0.0 a 1.0)
-  - localização exata onde o match foi encontrado
-  - screenshot anotado com o retângulo do match (para inspeção visual)
-  - screenshot bruto da região capturada (para confirmar se a região está certa)
+Mostra uma janela AO VIVO com a região MONITOR_PANEL capturada em contínuo,
+sobrepondo a confiança de match (0.0 a 1.0) de 'confirma_station'
+(futen_destination_check.png) e 'confirma_carrier'
+(carrier_destination_confirm.png) em tempo real, e desenha o retângulo do
+melhor match encontrado.
 
 USO:
     python3 debug_template_match.py
 
     Corre com o jogo aberto, DEPOIS do painel de seleção de destino já ter
     sido fechado (menu '1') -- é nesse estado que o texto de confirmação
-    ("FUTEN SPACEPORT" / "CARRIER (ZAHIR W6G-26N)") fica visível, não com o
-    painel ainda aberto. Isto reflete a ordem actual de select_target.py
-    (fechar painel -> só depois verificar por nome).
+    ("FUTEN SPACEPORT" / "CARRIER (ZAHIR W6G-26N)") fica visível.
+
+Teclas (com a janela em foco):
+    's' -- grava screenshot bruto + anotado do frame atual em debug_output/
+    'q' ou ESC -- sai
 
 AJUSTA antes de correr:
     - MONITOR_PANEL: coordenadas da região a capturar (linha ~40)
@@ -27,17 +27,18 @@ AJUSTA antes de correr:
     - THRESHOLD: confiança mínima considerada "match" (linha ~45)
 """
 
+import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-try:
-    from infra_bridge import mss
-except ImportError:
-    print("[AVISO] Não consegui importar infra_bridge.mss — a usar mss diretamente.")
-    import mss
+# infra_bridge.py está na raiz do repo, não em debug/ -- garante que é
+# encontrado independentemente da pasta a partir de onde o script é chamado.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from infra_bridge import mss, SCREEN_WIDTH
 
 # ==========================================
 # CONFIGURAÇÃO — AJUSTA ISTO
@@ -56,130 +57,135 @@ TEMPLATES_TO_TEST = {
 # Formato mss: {"left": x, "top": y, "width": w, "height": h}
 MONITOR_PANEL = {
     "top": 200,
-    "left": 50,
+    "left": 30,  # ajustado -20px (era 50) -- teste para separar melhor confirma_station vs confirma_carrier
     "width": 1000,
     "height": 800,
 }
 
 THRESHOLD = 0.80  # mesmo valor usado em select_target.py (procurar_template(..., 0.80))
 
+REFRESCO_MS = 150  # intervalo entre capturas (ms) -- ~6-7 fps, suficiente para inspeção visual
+
 OUTPUT_DIR = Path("debug_output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-def capturar_regiao(monitor: dict) -> np.ndarray:
-    """Captura a região definida e devolve como imagem BGR (cv2)."""
-    with mss.mss() as sct:
-        shot = sct.grab(monitor)
-        img = np.array(shot)  # BGRA
-        img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-    return img_bgr
+def carregar_templates() -> dict:
+    templates = {}
+    for nome, caminho in TEMPLATES_TO_TEST.items():
+        if not caminho.exists():
+            print(f"[AVISO] Template não encontrado: {caminho}")
+            continue
+        t = cv2.imread(str(caminho), cv2.IMREAD_COLOR)
+        if t is None:
+            print(f"[AVISO] cv2 não conseguiu ler: {caminho}")
+            continue
+        templates[nome] = t
+    return templates
 
 
-def testar_template(nome: str, caminho_template: Path, screenshot: np.ndarray) -> dict:
-    """Faz template matching e devolve confiança + localização."""
-    if not caminho_template.exists():
-        return {"nome": nome, "erro": f"Ficheiro não encontrado: {caminho_template}"}
-
-    template = cv2.imread(str(caminho_template), cv2.IMREAD_COLOR)
-    if template is None:
-        return {"nome": nome, "erro": f"cv2 não conseguiu ler: {caminho_template}"}
-
-    th, tw = template.shape[:2]
-    sh, sw = screenshot.shape[:2]
-
-    if th > sh or tw > sw:
-        return {
+def avaliar_frame(frame: np.ndarray, templates: dict) -> list:
+    sh, sw = frame.shape[:2]
+    resultados = []
+    for nome, template in templates.items():
+        th, tw = template.shape[:2]
+        if th > sh or tw > sw:
+            resultados.append({"nome": nome, "erro": f"template ({tw}x{th}) maior que a região ({sw}x{sh})"})
+            continue
+        resultado = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
+        resultados.append({
             "nome": nome,
-            "erro": (
-                f"Template ({tw}x{th}) é maior que a região capturada ({sw}x{sh}). "
-                "A região MONITOR_PANEL provavelmente está errada."
-            ),
-        }
-
-    resultado = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
-
-    return {
-        "nome": nome,
-        "confianca": max_val,
-        "localizacao": max_loc,  # canto superior-esquerdo do match, relativo à região capturada
-        "tamanho_template": (tw, th),
-        "match_ok": max_val >= THRESHOLD,
-    }
+            "confianca": max_val,
+            "localizacao": max_loc,
+            "tamanho_template": (tw, th),
+            "match_ok": max_val >= THRESHOLD,
+        })
+    return resultados
 
 
-def anotar_e_gravar(screenshot: np.ndarray, resultados: list, timestamp: str):
-    """Desenha retângulos dos matches encontrados e grava a imagem anotada."""
-    anotada = screenshot.copy()
-
+def desenhar_overlay(frame: np.ndarray, resultados: list) -> np.ndarray:
+    anotado = frame.copy()
+    y_txt = 25
     for r in resultados:
         if "erro" in r:
+            cv2.putText(anotado, f"{r['nome']}: {r['erro']}", (10, y_txt),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+            y_txt += 25
             continue
+
+        cor = (0, 255, 0) if r["match_ok"] else (0, 0, 255)
         x, y = r["localizacao"]
         tw, th = r["tamanho_template"]
-        cor = (0, 255, 0) if r["match_ok"] else (0, 0, 255)  # verde=ok, vermelho=falhou threshold
-        cv2.rectangle(anotada, (x, y), (x + tw, y + th), cor, 2)
-        label = f"{r['nome']}: {r['confianca']:.3f}"
-        cv2.putText(anotada, label, (x, max(y - 10, 15)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, cor, 2)
+        cv2.rectangle(anotado, (x, y), (x + tw, y + th), cor, 2)
 
+        status = "MATCH" if r["match_ok"] else "sem match"
+        linha = f"{r['nome']}: {r['confianca']:.4f} ({status}, threshold {THRESHOLD})"
+        cv2.putText(anotado, linha, (10, y_txt), cv2.FONT_HERSHEY_SIMPLEX, 0.55, cor, 2)
+        y_txt += 25
+    return anotado
+
+
+def gravar(frame: np.ndarray, anotado: np.ndarray) -> None:
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
     caminho_bruto = OUTPUT_DIR / f"screenshot_bruto_{timestamp}.png"
     caminho_anotado = OUTPUT_DIR / f"screenshot_anotado_{timestamp}.png"
-    cv2.imwrite(str(caminho_bruto), screenshot)
-    cv2.imwrite(str(caminho_anotado), anotada)
-
-    return caminho_bruto, caminho_anotado
+    cv2.imwrite(str(caminho_bruto), frame)
+    cv2.imwrite(str(caminho_anotado), anotado)
+    print(f"[GRAVADO] {caminho_bruto.name} / {caminho_anotado.name}")
 
 
 def main():
     print("=" * 60)
-    print("DEBUG: Template Matching — confirmação de destino")
+    print("DEBUG LIVE: Template Matching — confirmação de destino")
     print("=" * 60)
     print(f"Região capturada (MONITOR_PANEL): {MONITOR_PANEL}")
     print(f"Threshold de confiança: {THRESHOLD}")
     print()
-    print("A capturar em 3 segundos — certifica-te que o painel de")
-    print("seleção de destino já foi FECHADO (menu '1') e que o alvo")
-    print("trancado está visível no jogo AGORA.")
-    time.sleep(3)
-
-    screenshot = capturar_regiao(MONITOR_PANEL)
-    print(f"Screenshot capturado: {screenshot.shape[1]}x{screenshot.shape[0]} px\n")
-
-    resultados = []
-    for nome, caminho in TEMPLATES_TO_TEST.items():
-        r = testar_template(nome, caminho, screenshot)
-        resultados.append(r)
-
-        print(f"--- {nome} ---")
-        if "erro" in r:
-            print(f"  ERRO: {r['erro']}")
-        else:
-            status = "✓ MATCH" if r["match_ok"] else "✗ sem match (abaixo do threshold)"
-            print(f"  Confiança: {r['confianca']:.4f}  {status}")
-            print(f"  Localização (x,y) na região capturada: {r['localizacao']}")
-            print(f"  Tamanho do template: {r['tamanho_template']}")
-        print()
-
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    caminho_bruto, caminho_anotado = anotar_e_gravar(screenshot, resultados, timestamp)
-
-    print("=" * 60)
-    print(f"Screenshot bruto gravado em:    {caminho_bruto}")
-    print(f"Screenshot anotado gravado em:  {caminho_anotado}")
-    print("=" * 60)
+    print("Janela ao vivo -- valores atualizam em contínuo.")
+    print("Teclas (com a janela em foco): 's' grava | 'q' ou ESC sai.")
     print()
-    print("PRÓXIMO PASSO:")
-    print("Abre o screenshot anotado. Se os retângulos não aparecem")
-    print("onde o texto de confirmação está no ecrã real, o problema")
-    print("é a região MONITOR_PANEL (coordenadas erradas) ou o template")
-    print("está desatualizado (screenshot antigo, resolução diferente).")
-    print()
-    print("Se a confiança estiver perto do threshold mas não o atingir")
-    print("(ex: 0.68 com threshold 0.80), pode bastar baixar o THRESHOLD")
-    print("neste script — mas testa em várias situações antes de mudar")
-    print("o valor no select_target.py, para não criares falsos positivos.")
+
+    templates = carregar_templates()
+    if not templates:
+        print("[FATAL] Nenhum template válido carregado -- a sair.")
+        return
+
+    janela = "Debug Match - confirmacao de destino (live)"
+
+    # Força a sessão PipeWire (e o eventual popup do KDE) a resolver-se ANTES
+    # de criar a janela -- cv2.namedWindow() antes da sessão ativa colide com
+    # o GLib main loop da bridge (ver nota em infra_bridge.py, mesma
+    # mitigação usada em olho.py).
+    with mss.mss() as sct:
+        sct.grab({"top": 0, "left": 0, "width": 50, "height": 50})
+
+    cv2.namedWindow(janela, cv2.WINDOW_NORMAL)
+
+    # Posiciona a janela FORA da área do jogo. O infra_bridge.mss (PipeWire/
+    # portal KDE) não expõe geometria real de vários monitores -- por isso,
+    # ao contrário do vender.py, não dá para usar monitores[2] (nunca existe
+    # aqui). Assume-se um 2º monitor à direita do ecrã do jogo (SCREEN_WIDTH,
+    # 0). Se o teu monitor secundário estiver noutra posição, ajusta aqui.
+    cv2.moveWindow(janela, SCREEN_WIDTH, 0)
+    cv2.setWindowProperty(janela, cv2.WND_PROP_TOPMOST, 1)
+
+    with mss.mss() as sct:
+        while True:
+            img_bgra = np.array(sct.grab(MONITOR_PANEL))
+            frame = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+
+            resultados = avaliar_frame(frame, templates)
+            anotado = desenhar_overlay(frame, resultados)
+
+            cv2.imshow(janela, anotado)
+            tecla = cv2.waitKey(REFRESCO_MS) & 0xFF
+            if tecla in (ord('q'), 27):
+                break
+            if tecla == ord('s'):
+                gravar(frame, anotado)
+
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

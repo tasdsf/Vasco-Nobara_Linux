@@ -82,7 +82,7 @@ def focar_jogo_seguro():
 # ==========================================
 # 1. SETUP E ÁREAS
 # ==========================================
-MONITOR_PANEL = {"top": 200, "left": 50, "width": 1000, "height": 800}
+MONITOR_PANEL = {"top": 200, "left": 30, "width": 1000, "height": 800}
 from infra_bridge import ED_LOG_DIR
 LOG_DIR = ED_LOG_DIR
 
@@ -312,6 +312,9 @@ def marcar_destino_dinamico():
         print(f"[AVISO] Não foi possível validar visualmente o Lock no {label_alvo}. Assumindo sucesso cego.")
         pydirectinput.press('space')
 
+    pydirectinput.press('1') # Fecha o painel
+    time.sleep(1.0)
+
     # Verificação final por NOME (não só o ícone genérico STATION/CARRIER):
     # já aconteceu o "sucesso" ser reportado com o carrier a continuar como
     # alvo de HUD e de rota -- os popups LOCKED/UNLOCKED são genéricos e não
@@ -328,9 +331,6 @@ def marcar_destino_dinamico():
     if not procurar_template(template_confirma, f"CONFIRMA {nome_confirma}", MONITOR_PANEL, 0.80):
         abortar_com_erro(f"Alvo trancado não confere com '{nome_confirma}' esperado para {label_alvo} -- "
                           f"possível seleção incorreta (ex: manteve o alvo anterior). Intervenção manual necessária.")
-
-    pydirectinput.press('1') # Fecha o painel
-    time.sleep(1.0)
     return True
 
 def executar():
