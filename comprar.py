@@ -25,6 +25,10 @@ else:
 diretorio_atual = os.path.dirname(os.path.abspath(__file__))
 pasta_logs = os.path.join(diretorio_atual, "logs")
 os.makedirs(pasta_logs, exist_ok=True)
+# Última captura de procurar_template(), sobrescrita a cada chamada -- dá
+# evidência forense de qualquer falha sem depender de VISUAL_DEBUG (mesmo
+# padrão do undocking.py/select_target.py).
+log_test = os.path.join(pasta_logs, "comprar_test.png")
 
 # Logger proprio (nao usa logging.basicConfig -- com varios scripts no mesmo
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
@@ -102,6 +106,16 @@ pasta_imagens = os.path.join(diretorio_atual, 'images')
 
 templates_nomes = {
     'servicos': 'STARPORT_SERVICES.png',
+    # Pelo sim pelo não -- caso este script alguma vez corra com a nave
+    # atracada no Fleet Carrier (menu diz "CARRIER SERVICES" em vez de
+    # "STARPORT SERVICES", mesmo layout). Mesmo mismatch já visto e
+    # corrigido no undocking.py.
+    'servicos_carrier': 'CARRIER_SERVICES.png',
+    # "Starport Services" vem pré-selecionado a amarelo brilhante assim que
+    # o painel abre (é o primeiro item da lista) -- 'servicos' foi calibrado
+    # no estado apagado/sem foco e fica sempre a ~0.69 (abaixo do threshold
+    # 0.70) contra este estado. Recortado diretamente de logs/comprar_test.png.
+    'servicos_selecionado': 'STARPORT_SERVICES_SELECTED.png',
     'noselection': 'NO_SELECTION.png',
     'market_off': 'COMMODITIES_MARKET_OFF.png',
     'market_on': 'COMMODITIES_MARKET_ON.png',
@@ -187,6 +201,7 @@ def procurar_template(template, nome_label, monitor, threshold=0.80):
     with mss.mss() as sct:
         img_bgra = np.array(sct.grab(monitor))
         img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(log_test, img_bgr)
         resultado = cv2.matchTemplate(img_bgr, template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
         encontrou = max_val >= threshold
@@ -215,21 +230,25 @@ def fase_1_entrar_servicos():
     print("\n>>> FASE 1: Menu Holográfico...")
     timeout = time.time() + 15
     while not (procurar_template(templates['noselection'], "IDLE", MONITOR_MENU, 0.72) or
-               procurar_template(templates['servicos'], "SERVICES", MONITOR_MENU, 0.70)):
-        
+               procurar_template(templates['servicos'], "SERVICES", MONITOR_MENU, 0.70) or
+               procurar_template(templates['servicos_carrier'], "SERVICES (CARRIER)", MONITOR_MENU, 0.70) or
+               procurar_template(templates['servicos_selecionado'], "SERVICES (SELECIONADO)", MONITOR_MENU, 0.80)):
+
         if time.time() > timeout:
             abortar_com_erro("Timeout (15s) à espera que o painel principal da estação estabilize.")
         time.sleep(0.5)
-    
+
     time.sleep(1.2)
     for tecla in ['s', 's', 'w', 'w']:
-        if procurar_template(templates['servicos'], "SERVICES", MONITOR_MENU, 0.70):
+        if (procurar_template(templates['servicos'], "SERVICES", MONITOR_MENU, 0.70) or
+                procurar_template(templates['servicos_carrier'], "SERVICES (CARRIER)", MONITOR_MENU, 0.70) or
+                procurar_template(templates['servicos_selecionado'], "SERVICES (SELECIONADO)", MONITOR_MENU, 0.80)):
             pydirectinput.press('space')
             return True
         pydirectinput.press(tecla)
         time.sleep(0.6)
-        
-    abortar_com_erro("Botão 'Starport Services' não detetado após a sequência mecânica de focagem.")
+
+    abortar_com_erro("Botão 'Starport/Carrier Services' não detetado após a sequência mecânica de focagem.")
 
 def fase_2_abrir_mercado():
     print("\n>>> FASE 2: Abrindo Mercado...")

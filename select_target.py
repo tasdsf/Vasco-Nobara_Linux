@@ -16,6 +16,11 @@ import time
 diretorio_atual = os.path.dirname(os.path.abspath(__file__))
 pasta_logs = os.path.join(diretorio_atual, "logs")
 os.makedirs(pasta_logs, exist_ok=True)
+# Última captura de procurar_template(), sobrescrita a cada chamada -- dá
+# evidência forense de qualquer falha sem depender de VISUAL_DEBUG (mesmo
+# padrão do undocking.py, que já foi decisivo para diagnosticar os bugs do
+# menu estação-vs-carrier).
+log_test = os.path.join(pasta_logs, "select_target_test.png")
 
 # Logger proprio (nao usa logging.basicConfig -- com varios scripts no mesmo
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
@@ -95,6 +100,10 @@ templates_nomes = {
     'station_alt': 'STATION1.png',
     'locked': 'LOCKED_DESTINATION.png',
     'unlocked': 'UNLOCKED_DESTINATION.png',
+    # Título do ecrã de detalhe (ícone + nome), calibrado diretamente do jogo
+    # na nave atual -- ver área1.png/área2.png. Aparece assim que se abre o
+    # detalhe do alvo, ANTES de qualquer lock/unlock, por isso serve para
+    # confirmar o nome cedo (ver marcar_destino_dinamico).
     'confirma_carrier': 'carrier_destination_confirm.png',
     'confirma_station': 'futen_destination_check.png'
 }
@@ -215,6 +224,7 @@ def procurar_template(template, nome_label, monitor, threshold=0.80):
     with mss.mss() as sct:
         img_bgra = np.array(sct.grab(monitor))
         img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(log_test, img_bgr)
 
         encontrou = False
         melhor_val, melhor_loc, melhor_tmpl, melhor_th = -1.0, (0, 0), variantes[0][0], variantes[0][1]
@@ -255,13 +265,15 @@ def marcar_destino_dinamico():
     # dar margem de seguranca real sem colidir com o ruido.
     if tipo_alvo == "station":
         template_alvo = [(templates['station'], 0.75), (templates['station_alt'], 0.75)]
+        template_confirma, nome_confirma = templates['confirma_station'], "FUTEN SPACEPORT"
     else:
         template_alvo = [(templates['carrier'], 0.78)]
-    
+        template_confirma, nome_confirma = templates['confirma_carrier'], "CARRIER (ZAHIR W6G-26N)"
+
     print(f"\n>>> FASE: Marcar Destino ({label_alvo})...")
     pydirectinput.press('1')
     time.sleep(1.2)
-    
+
     # Watchdog: Encontrar a aba NAVIGATION
     # Às vezes uma luz (sol/estação) bate exatamente em cima da aba e oclui
     # a deteção momentaneamente -- watchdog continuo de 6 minutos em vez de
@@ -277,29 +289,54 @@ def marcar_destino_dinamico():
 
     if not nav_found:
         abortar_com_erro("Falha ao focar na aba de navegação do painel esquerdo após 6 minutos de tentativas.")
-    
-    pydirectinput.press('d'); time.sleep(0.5)
-    
-    # Watchdog: Varrer a lista em busca do alvo (Máximo de 25 tentativas / scrolls)
-    achou = False
-    for i in range(25):
-        # Cada variante (template_alvo) já traz o seu próprio threshold embutido
-        if procurar_template(template_alvo, label_alvo, MONITOR_PANEL):
-            print(f"\n>>> FASE: ACHOU ({label_alvo})...")
-            time.sleep(2.4) # Dá tempo ao menu do painel pop-up para renderizar
-            achou = True
-            break
-        pydirectinput.press('s'); time.sleep(0.4)
-    
-    if not achou:
-        abortar_com_erro(f"Alvo dinâmico '{label_alvo}' não encontrado na lista de navegação após 25 varrimentos.")
-    
-    print(f"\n>>> FASE: Selecionando ({label_alvo})...")
-    time.sleep(1.0)
-    pydirectinput.press('space')
-    time.sleep(1.0)
 
-    # Verificação de Bloqueio (Lock)
+    pydirectinput.press('d'); time.sleep(0.5)
+
+    # Varre a lista à procura de um candidato (ícone genérico STATION/CARRIER
+    # -- não distingue QUAL estação/carrier, e em sistemas com dezenas de
+    # carriers pode calhar num diferente do pretendido) e confirma o NOME
+    # assim que o ecrã de detalhe abre, ANTES de mexer no lock -- não vale a
+    # pena trancar um alvo que nem é o certo. Se o nome não bater, volta à
+    # lista e continua a varrer para o candidato seguinte; até 3 candidatos
+    # verificados (na prática o certo costuma aparecer à 2ª ou 3ª).
+    MAX_TENTATIVAS_NOME = 3
+    tentativas_nome = 0
+    achou_nome_certo = False
+
+    for i in range(40):
+        if not procurar_template(template_alvo, label_alvo, MONITOR_PANEL):
+            pydirectinput.press('s'); time.sleep(0.4)
+            continue
+
+        print(f"\n>>> FASE: ACHOU ({label_alvo}) -- a confirmar nome antes do lock...")
+        time.sleep(2.4)  # Dá tempo ao ecrã de detalhe pop-up para renderizar
+        pydirectinput.press('space')
+        time.sleep(1.0)
+
+        if procurar_template(template_confirma, f"CONFIRMA {nome_confirma}", MONITOR_PANEL, 0.80):
+            print(f"[OK] Nome confirmado ({nome_confirma}).")
+            achou_nome_certo = True
+            break
+
+        tentativas_nome += 1
+        msg = (f"Candidato para {label_alvo} não confere com '{nome_confirma}' "
+               f"(tentativa {tentativas_nome}/{MAX_TENTATIVAS_NOME}) -- provavelmente outro "
+               f"{label_alvo.lower()} com ícone parecido.")
+        print(f"[AVISO] {msg}")
+        _logger.error(msg)
+
+        if tentativas_nome >= MAX_TENTATIVAS_NOME:
+            break
+
+        pydirectinput.press('backspace'); time.sleep(0.8)  # sai do ecrã de detalhe errado
+        pydirectinput.press('s'); time.sleep(0.4)  # avança para o candidato seguinte
+
+    if not achou_nome_certo:
+        abortar_com_erro(f"Não foi possível confirmar o nome certo ('{nome_confirma}') para {label_alvo} "
+                          f"em {MAX_TENTATIVAS_NOME} tentativas -- possível ambiguidade entre vários "
+                          f"candidatos com ícone parecido. Intervenção manual necessária.")
+
+    # Verificação de Bloqueio (Lock) -- só chega aqui com o nome já confirmado certo.
     if procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, 0.82):
         pydirectinput.press('space')
         time.sleep(0.5)
@@ -312,25 +349,8 @@ def marcar_destino_dinamico():
         print(f"[AVISO] Não foi possível validar visualmente o Lock no {label_alvo}. Assumindo sucesso cego.")
         pydirectinput.press('space')
 
-    pydirectinput.press('1') # Fecha o painel
+    pydirectinput.press('backspace') # Fecha o painel (ou sobe um nível)
     time.sleep(1.0)
-
-    # Verificação final por NOME (não só o ícone genérico STATION/CARRIER):
-    # já aconteceu o "sucesso" ser reportado com o carrier a continuar como
-    # alvo de HUD e de rota -- os popups LOCKED/UNLOCKED são genéricos e não
-    # garantem QUAL alvo ficou realmente trancado, e o jogo não grava nenhum
-    # evento no journal quando se tranca um alvo pelo painel local. Por isso
-    # confirma-se aqui, lendo o nome do alvo agora trancado, antes de fechar
-    # o painel -- se não bater certo, pede-se intervenção humana em vez de
-    # assumir sucesso às cegas.
-    if tipo_alvo == "station":
-        template_confirma, nome_confirma = templates['confirma_station'], "FUTEN SPACEPORT"
-    else:
-        template_confirma, nome_confirma = templates['confirma_carrier'], "CARRIER (ZAHIR W6G-26N)"
-
-    if not procurar_template(template_confirma, f"CONFIRMA {nome_confirma}", MONITOR_PANEL, 0.80):
-        abortar_com_erro(f"Alvo trancado não confere com '{nome_confirma}' esperado para {label_alvo} -- "
-                          f"possível seleção incorreta (ex: manteve o alvo anterior). Intervenção manual necessária.")
     return True
 
 def executar():

@@ -104,6 +104,10 @@ def focar_jogo_seguro():
 # ==========================================
 MONITOR_MENU = {"top": 770, "left": 800, "width": 330, "height": 300}
 MONITOR_CORNER = {"top": 50, "left": 1400, "width": 500, "height": 300}
+# Canto inferior direito do HUD -- checkbox "MASS LOCKED" (calibrado a partir
+# de images/area.png). Usado como redundância visual à saída da no-fire-zone,
+# a par do evento do Journal (ver aguardar_no_fire_zone_exit).
+MONITOR_FIRE_ZONE = {"top": 890, "left": 1600, "width": 250, "height": 100}
 
 LOG_DIR = ED_LOG_DIR
 
@@ -147,8 +151,21 @@ pasta_imagens = os.path.join(diretorio_atual, 'images')
 templates_nomes = {
     'repair': 'repair.png',
     'autolaunch': 'AUTO_LAUNCH.png',
+    'autolaunch_carrier': 'AUTO_LAUNCH_CARRIER.png',
     'noselection': 'NO_SELECTION.png',
-    'auto_complete': 'AUTO_LAUNCH_COMPLETE.png'
+    # Carrier tem o mesmo menu mas com "CARRIER SERVICES" em vez de "STARPORT
+    # SERVICES" -- o texto diferente basta para o match cair de ~90% para
+    # ~68% (abaixo do threshold de 70%) e abortar em falso. Fallback abaixo.
+    'noselection_carrier': 'NO_SELECTION_CARRIER.png',
+    'auto_complete': 'AUTO_LAUNCH_COMPLETE.png',
+    # Checkbox "MASS LOCKED" do HUD, ligado/desligado -- redundância visual
+    # da saída da no-fire-zone (ver MONITOR_FIRE_ZONE e
+    # aguardar_no_fire_zone_exit). Recorte apertado (só o ícone, sem o texto
+    # "MASS LOCKED", que é igual nos dois estados) -- com o texto incluído a
+    # correlação on-vs-off ficava em 0.85 (texto igual a dominar o score);
+    # só com o ícone cai para 0.61, com margem real para o threshold.
+    'fire_zone_on': 'fire-zone-on.png',
+    'fire_zone_off': 'fire-zone-off.png'
 }
 
 templates = {}
@@ -250,10 +267,16 @@ def executar_auto_launch():
     noselect_val = 0.7
     sucesso_idle, score_idle = procurar_template(templates['noselection'], "VAL_NO_SELECTION", MONITOR_MENU, noselect_val)
     if not sucesso_idle:
-        falar("Error. Validation failed at menu top. Aborting sequence.")
-        abortar_com_erro(f"Falha crítica ótica no teto. Match real: {score_idle*100:.1f}% (Exigia: {noselect_val*100}%)")
-
-    print(f"[OK] 'NO_SELECTION' validado com {score_idle*100:.1f}%.")
+        # Fallback: pode ser o menu do Fleet Carrier ("CARRIER SERVICES" em
+        # vez de "STARPORT SERVICES") -- mesmo layout, texto diferente.
+        sucesso_idle_carrier, score_idle_carrier = procurar_template(templates['noselection_carrier'], "VAL_NO_SELECTION_CARRIER", MONITOR_MENU, noselect_val)
+        if sucesso_idle_carrier:
+            print(f"[OK] 'NO_SELECTION' (Carrier) validado com {score_idle_carrier*100:.1f}%.")
+        else:
+            falar("Error. Validation failed at menu top. Aborting sequence.")
+            abortar_com_erro(f"Falha crítica ótica no teto. Match real: {score_idle*100:.1f}% / Carrier: {score_idle_carrier*100:.1f}% (Exigia: {noselect_val*100}%)")
+    else:
+        print(f"[OK] 'NO_SELECTION' validado com {score_idle*100:.1f}%.")
 
     # Passo 3: Descida Mecânica
     print("\nA navegar para a posição do botão: 2x 's'...")
@@ -266,20 +289,31 @@ def executar_auto_launch():
     time.sleep(0.3)
     autolaunch_val = 0.82
     sucesso_al, score_al = procurar_template(templates['autolaunch'], "VAL_AUTO_LAUNCH", MONITOR_MENU, autolaunch_val)
+    template_al_ativo = templates['autolaunch']
     if not sucesso_al:
-        falar("Auto launch not detected.")
-        abortar_com_erro(f"Botão Auto-Launch não detetado (Match real: {score_al*100:.1f}% / Exigia {autolaunch_val*100}%)")
+        # Fallback: mesmo mismatch do Passo 2 -- "CARRIER SERVICES" em vez de
+        # "STARPORT SERVICES" por trás da linha "Auto Launch" já destacada.
+        sucesso_al_carrier, score_al_carrier = procurar_template(templates['autolaunch_carrier'], "VAL_AUTO_LAUNCH_CARRIER", MONITOR_MENU, autolaunch_val)
+        if sucesso_al_carrier:
+            print(f"[OK] 'AUTO_LAUNCH' (Carrier) validado com {score_al_carrier*100:.1f}%.")
+            template_al_ativo = templates['autolaunch_carrier']
+        else:
+            falar("Auto launch not detected.")
+            abortar_com_erro(f"Botão Auto-Launch não detetado (Match real: {score_al*100:.1f}% / Carrier: {score_al_carrier*100:.1f}% / Exigia {autolaunch_val*100}%)")
 
     # Passo 5: Execução Limpa, com confirmação de que o press saiu do botão.
     # O press('space') é um subprocess.run ao ydotool sem verificar o codigo
     # de saida -- se falhar em silencio nesse instante, o botao continua
     # visivel e nunca saberiamos. Por isso confirmamos que ele desapareceu
     # (sinal de que o menu reagiu) antes de avançar para a espera longa.
+    # Usa o mesmo template (estação ou carrier) que validou no Passo 4 --
+    # senão a confirmação de "desapareceu" fica a comparar com o template
+    # errado outra vez.
     print("\n>>> TUDO VALIDADO! A disparar comando SPACE...")
     for tentativa in range(3):
         pydirectinput.press('space')
         time.sleep(1.0)
-        ainda_visivel, _ = procurar_template(templates['autolaunch'], "VAL_AUTO_LAUNCH_POS", MONITOR_MENU, autolaunch_val)
+        ainda_visivel, _ = procurar_template(template_al_ativo, "VAL_AUTO_LAUNCH_POS", MONITOR_MENU, autolaunch_val)
         if not ainda_visivel:
             break
         print(f"[AVISO] Botão Auto-Launch ainda visível após o SPACE (tentativa {tentativa+1}/3). A repetir...")
@@ -329,29 +363,55 @@ def sequencia_salto():
     pydirectinput.press('x')
     time.sleep(8.0)
 
+FIRE_ZONE_VISUAL_THRESHOLD = 0.85  # separacao real: self-match ~1.0, cross on/off ~0.61 (ver comentario em templates_nomes)
+FIRE_ZONE_VISUAL_CONFIRMACOES = 2  # deteções consecutivas exigidas antes de aceitar o sinal visual (evita 1 frame de ruído)
+
 def aguardar_no_fire_zone_exit(ancora_log, timeout=60):
     """ Gate final antes de entregar o controlo ao OLHO: a deteção visual do
     AUTO_COMPLETE (acima) pode dar falso positivo -- já aconteceu a nave ficar
     presa junto ao pad com o HUD a bater ruído nos 70%+ e a manobra seguir em
     frente na mesma. Este evento vem do próprio Journal do jogo, por isso não
     há como fingir: só avançamos quando o jogo confirma "No fire zone exited".
-    Se a nave estiver mesmo presa em trânsito (raro), abortamos como qualquer
-    outra falha desta máquina de estados -- não vale a pena complicar com
-    lógica de recuperação para um caso raro; aceitar o prejuízo e deixar o
-    'a' (modo automático) tentar de novo é mais barato. """
-    print(f"\n>>> FASE: A confirmar saída da no-fire-zone via Journal (timeout {timeout}s)...")
+
+    Redundância: já aconteceu o Journal simplesmente parar de escrever
+    eventos a meio da manobra (sessão presa) e este gate nunca confirmar,
+    mesmo com a nave já fora da no-fire-zone. Por isso também aceitamos o
+    checkbox "MASS LOCKED" do HUD (MONITOR_FIRE_ZONE) a passar a
+    desmarcado -- sinal de estado em tempo real, não uma notificação
+    pontual, por isso não tem o mesmo risco de falso positivo do
+    AUTO_COMPLETE. Exige duas deteções seguidas para não confiar num único
+    frame de ruído.
+
+    Se a nave estiver mesmo presa em trânsito (raro) e nenhum dos dois sinais
+    confirmar, abortamos como qualquer outra falha desta máquina de estados
+    -- não vale a pena complicar com lógica de recuperação para um caso raro;
+    aceitar o prejuízo e deixar o 'a' (modo automático) tentar de novo é mais
+    barato. """
+    print(f"\n>>> FASE: A confirmar saída da no-fire-zone via Journal + Visão (timeout {timeout}s)...")
     timeout_real = time.time() + timeout
+    confirmacoes_visuais = 0
 
     while time.time() < timeout_real:
         for evento in ler_novos_eventos(ancora_log):
             if evento.get('event') == 'ReceiveText' and evento.get('Message') == '$STATION_NoFireZone_exited;':
                 print("[OK] 'No fire zone exited' confirmado pelo Journal.")
-                _logger.info("No fire zone exited confirmado -- handoff para OLHO autorizado.")
+                _logger.info("No fire zone exited confirmado (Journal) -- handoff para OLHO autorizado.")
                 return True
+
+        saiu_visualmente, score_visual = procurar_template(templates['fire_zone_off'], "FIRE_ZONE_OFF", MONITOR_FIRE_ZONE, FIRE_ZONE_VISUAL_THRESHOLD)
+        if saiu_visualmente:
+            confirmacoes_visuais += 1
+            if confirmacoes_visuais >= FIRE_ZONE_VISUAL_CONFIRMACOES:
+                print(f"[OK] 'No fire zone exited' confirmado pela Visão ({score_visual*100:.1f}%) -- Journal não confirmou a tempo.")
+                _logger.info(f"No fire zone exited confirmado (Visao, {score_visual*100:.1f}%) -- handoff para OLHO autorizado.")
+                return True
+        else:
+            confirmacoes_visuais = 0
+
         time.sleep(0.5)
 
     falar("Warning. Still inside station no fire zone.")
-    abortar_com_erro("Timeout à espera de 'No fire zone exited' no Journal. A nave pode estar presa/bloqueada perto da estação.")
+    abortar_com_erro("Timeout à espera de 'No fire zone exited' no Journal/Visão. A nave pode estar presa/bloqueada perto da estação.")
 
 # ==========================================
 # 4. EXECUÇÃO PRINCIPAL

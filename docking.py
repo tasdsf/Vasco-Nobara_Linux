@@ -276,7 +276,11 @@ def solicitar_docking():
                 pydirectinput.press('d')
                 time.sleep(0.4)
         
-        pydirectinput.press('1') # Fecha o painel holográfico
+        # 'backspace' em vez de '1' -- '1' é o toggle que abriu o painel, só
+        # fecha se o jogo estiver exatamente no estado que o toggle espera;
+        # 'backspace' sai de qualquer nível de menu, mesmo padrão já usado no
+        # select_target.py.
+        pydirectinput.press('backspace') # Fecha o painel holográfico
         time.sleep(1.5)
 
         if clicou:

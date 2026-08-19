@@ -449,13 +449,45 @@ def aplicar_manobra_hud(dx, dy):
         for t in teclas: pydirectinput.keyUp(t)
         time.sleep(2.0) # Mantidos os 2 segundos estruturais de estabilização
 
-def aplicar_roll_desocluir():
+ROLL_DESOCLUIR_COOLDOWN = 2.0  # segundos de pausa depois do impulso
+
+# Telemetria de sequência: quantos roll_desocluir seguidos (mesma ocorrência
+# de oclusão) até o loop principal parar de os chamar. Gap > 4s entre
+# chamadas conta como ocorrência nova. Sem isto não havia como saber, sem
+# contar linhas de log à mão, se 2s de cooldown chega ou se ainda encadeia
+# muitos impulsos -- dados para afinar o valor depois.
+_ultimo_roll_desocluir_ts = 0.0
+_streak_roll_desocluir = 0
+
+def aplicar_roll_desocluir(motivo="não especificado"):
     """ Pequeno impulso de roll -- não muda o rumo, só a orientação -- para
     tentar desocluir a vista quando algo (sol/planeta/corpo celeste) está a
-    tapar a zona do HUD onde o retículo do alvo deveria aparecer. """
+    tapar a zona do HUD onde o retículo do alvo deveria aparecer.
+
+    Duração do impulso medida e confirmada normal (~0.53s, não é tecla
+    presa) -- o problema real era a ausência de cooldown: sem pausa
+    nenhuma, o próximo ciclo do loop principal via logo a bússola/HUD ainda
+    por confirmar e disparava outro roll na mesma direção quase sem
+    intervalo (~0.64s) -- 16 seguidos numa ocorrência real (log
+    2026-08-19 05:39:12-22, ~10.3s a rodar sem parar). Cooldown de 2s a
+    seguir ao impulso, mais telemetria de sequência (streak) para afinar
+    este valor com dados reais mais tarde. """
+    global _ultimo_roll_desocluir_ts, _streak_roll_desocluir
+
+    agora = time.time()
+    if agora - _ultimo_roll_desocluir_ts > (ROLL_DESOCLUIR_COOLDOWN + 2.0):
+        _streak_roll_desocluir = 0  # gap grande -- conta como ocorrência nova
+    _streak_roll_desocluir += 1
+    _ultimo_roll_desocluir_ts = agora
+
+    inicio = time.time()
     pydirectinput.keyDown('q')
     time.sleep(0.5)
     pydirectinput.keyUp('q')
+    duracao = time.time() - inicio
+    _logger.warning(f"aplicar_roll_desocluir chamado ({motivo}) -- sequencia #{_streak_roll_desocluir} -- "
+                     f"duracao real do impulso: {duracao:.2f}s (esperado ~0.50s) -- cooldown {ROLL_DESOCLUIR_COOLDOWN}s")
+    time.sleep(ROLL_DESOCLUIR_COOLDOWN)
 
 # ==========================================
 # 5. EXECUÇÃO PRINCIPAL
@@ -539,7 +571,7 @@ def executar():
                         # Muitas vezes a falha é o sol/planeta a tapar o HUD --
                         # um pequeno impulso de roll (não muda o rumo, só a
                         # orientação) pode desocluir a vista.
-                        aplicar_roll_desocluir()
+                        aplicar_roll_desocluir(f"bussola NAO_DETETADO ha {time.time()-tempo_cego:.1f}s -- possivel sol/planeta a tapar")
                     elif cmd_bussola == "ALINHADO_MACRO":
                         # A bússola diz que o nariz já aponta ao alvo mas o HUD
                         # não confirma nenhum dos dois arcos do retículo --
@@ -551,7 +583,7 @@ def executar():
                         tempo_cego = None
                         comando_display = "MACRO: ALINHADO_MACRO (HUD tapado -- a rodar)"
                         largar_todas_as_teclas()
-                        aplicar_roll_desocluir()
+                        aplicar_roll_desocluir(f"ALINHADO_MACRO mas HUD nao confirma reticulo (bola a dx={dist_x} dy={dist_y} do centro) -- possivel oclusao do reticulo")
                     else:
                         tempo_cego = None
                         comando_display = f"MACRO: {cmd_bussola}"

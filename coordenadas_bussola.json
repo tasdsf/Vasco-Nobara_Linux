@@ -53,5 +53,16 @@
         "CX_NEUTRO": 31,
         "CY_NEUTRO": 36,
         "LIMIAR_THRESH": 138
+    },
+    "Mediumtransport01": {
+        "MONITOR_CONFIG": {
+            "top": 835,
+            "left": 721,
+            "width": 58,
+            "height": 68
+        },
+        "CX_NEUTRO": 29,
+        "CY_NEUTRO": 34,
+        "LIMIAR_THRESH": 136
     }
 }
