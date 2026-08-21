@@ -98,14 +98,36 @@ templates_nomes = {
     'carrier': 'FLEET_CARRIER_NAME.png',
     'station': 'STATION.png',
     'station_alt': 'STATION1.png',
-    'locked': 'LOCKED_DESTINATION.png',
-    'unlocked': 'UNLOCKED_DESTINATION.png',
+    # Texto do próprio botão de ação no ecrã de detalhe ("LOCK DESTINATION"
+    # / "UNLOCK DESTINATION") -- substitui LOCKED_DESTINATION.png /
+    # UNLOCKED_DESTINATION.png (arquivados com prefixo x), que verificavam
+    # a região larga do painel e podiam apanhar o cadeado de OUTRA linha
+    # (ex: a estação anterior, ainda trancada, visível por trás do cartão
+    # semi-transparente) e concluir "já trancado" sem nunca ter trancado o
+    # alvo certo -- bug real, confirmado em produção (2026-08-19 18:59: o
+    # Zahir nunca foi trancado, o Futen do ciclo anterior continuou como
+    # destino real, a nave ia descolar com 35 unidades por vender). Estes
+    # só existem dentro do cartão aberto -- não podem confundir-se com outra
+    # linha.
+    'locked': 'UNLOCK_DESTINATION_BUTTON.png',
+    'unlocked': 'LOCK_DESTINATION_BUTTON.png',
     # Título do ecrã de detalhe (ícone + nome), calibrado diretamente do jogo
     # na nave atual -- ver área1.png/área2.png. Aparece assim que se abre o
     # detalhe do alvo, ANTES de qualquer lock/unlock, por isso serve para
     # confirmar o nome cedo (ver marcar_destino_dinamico).
     'confirma_carrier': 'carrier_destination_confirm.png',
-    'confirma_station': 'futen_destination_check.png'
+    'confirma_station': 'futen_destination_check.png',
+    # Fallback da confirmação pós-lock: o jogo às vezes fecha o cartão de
+    # detalhe sozinho a seguir ao 'space' que tranca, voltando à lista --
+    # nesse caso o texto do botão (acima) já não está visível, mas o nome
+    # aparece entre setas "< NOME >" (sinal fiável confirmado em jogo:
+    # setas = trancado). Bug real, confirmado em produção (2026-08-19
+    # 19:37): Futen estava mesmo trancado (confirmado por Status.json e por
+    # esta própria lista) mas o check antigo (só cartão) abortou 3x a
+    # achar que tinha falhado. Variante de carrier recalibrada em
+    # 2026-08-19 20:14 (mesmo bug, desta vez com o Zahir).
+    'confirma_lista_station': 'futen_destination_confirm_lista.png',
+    'confirma_lista_carrier': 'zahir_destination_confirm_lista.png'
 }
 
 templates = {}
@@ -266,9 +288,11 @@ def marcar_destino_dinamico():
     if tipo_alvo == "station":
         template_alvo = [(templates['station'], 0.75), (templates['station_alt'], 0.75)]
         template_confirma, nome_confirma = templates['confirma_station'], "FUTEN SPACEPORT"
+        template_confirma_lista = templates['confirma_lista_station']
     else:
         template_alvo = [(templates['carrier'], 0.78)]
         template_confirma, nome_confirma = templates['confirma_carrier'], "CARRIER (ZAHIR W6G-26N)"
+        template_confirma_lista = templates['confirma_lista_carrier']
 
     print(f"\n>>> FASE: Marcar Destino ({label_alvo})...")
     pydirectinput.press('1')
@@ -336,12 +360,36 @@ def marcar_destino_dinamico():
                           f"em {MAX_TENTATIVAS_NOME} tentativas -- possível ambiguidade entre vários "
                           f"candidatos com ícone parecido. Intervenção manual necessária.")
 
-    # Verificação de Bloqueio (Lock) -- só chega aqui com o nome já confirmado certo.
-    if procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, 0.82):
+    # Verificação de Bloqueio (Lock) -- só chega aqui com o nome já confirmado
+    # certo. Depois de trancar (ramo "unlocked"), confirma que resultou
+    # mesmo em o alvo ficar trancado -- já aconteceu o 'space' não ter
+    # efeito e o alvo ficar por trancar sem nenhum erro aparente (ver
+    # comentário em templates_nomes). Duas formas possíveis do jogo
+    # confirmar isso: o cartão de detalhe fica aberto e o botão muda para
+    # "UNLOCK DESTINATION", OU o jogo fecha o cartão sozinho e volta à
+    # lista, mostrando o nome entre setas "< NOME >" -- bug real,
+    # confirmado em produção (2026-08-19 19:37): o Futen estava mesmo
+    # trancado (confirmado por Status.json e pela própria lista) mas só se
+    # verificava o cartão, e abortou 3x a achar que tinha falhado.
+    # Threshold 0.78 (não 0.82): os templates de botão foram recortados de
+    # área1.png/área2.png (resolução ligeiramente diferente da pipeline
+    # real MONITOR_PANEL) -- self-match real fica por volta de 0.80-1.0
+    # consoante a fonte, cross-contaminação confirmada a 0.615-0.73. 0.78 dá
+    # margem real dos dois lados.
+    LOCK_THRESHOLD = 0.78
+    if procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, LOCK_THRESHOLD):
         pydirectinput.press('space')
-        time.sleep(0.5)
+        time.sleep(1.0)
+
+        confirmado_pos_lock = procurar_template(templates['locked'], "LOCKED (POS-LOCK, cartao)", MONITOR_PANEL, LOCK_THRESHOLD)
+        if not confirmado_pos_lock and template_confirma_lista is not None:
+            confirmado_pos_lock = procurar_template(template_confirma_lista, "LOCKED (POS-LOCK, lista)", MONITOR_PANEL, LOCK_THRESHOLD)
+
+        if not confirmado_pos_lock:
+            abortar_com_erro(f"O 'space' para trancar {nome_confirma} não teve efeito -- nem o cartão mostra "
+                              f"'UNLOCK DESTINATION' nem a lista mostra o nome entre setas. Intervenção manual necessária.")
         falar(f"{label_alvo} destination locked.")
-    elif procurar_template(templates['locked'], "LOCKED", MONITOR_PANEL, 0.82):
+    elif procurar_template(templates['locked'], "LOCKED", MONITOR_PANEL, LOCK_THRESHOLD):
         print("[LOG] Destino já estava trancado.")
         falar(f"{label_alvo} already locked.")
     else:

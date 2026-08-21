@@ -141,10 +141,18 @@ def inicializar_infraestrutura():
 pydirectinput.PAUSE = 0.01
 BOT_ATIVO = True
 
-DEAD_ZONE_BUSSOLA = 2
+DEAD_ZONE_BUSSOLA = 1  # reduzido de 2 -- 2px era largo demais para o crop
+# pequeno da Mediumtransport01 (58x68): a bússola dava "alinhado" (bola
+# dentro da dead zone) enquanto o jogo ainda mostrava "ALIGN WITH TARGET
+# DESTINATION" e o Assist nunca trancava -- confirmado em produção
+# (2026-08-21).
 RAIO_AJUSTE_FINO = 12
 IMPULSO_BUSSOLA = 0.22
 TOLERANCIA_BOLA = 3.5
+
+FATOR_AD = 2  # 'a'/'d' (yaw) ficam pressionadas o dobro do tempo de 'w'/'s'
+# (pitch) em qualquer manobra combinada -- a nave gira mais devagar no eixo
+# de yaw, o mesmo impulso não desloca a bola o suficiente nesse eixo.
 
 # Mantidos os teus valores de calibração fina atualizados:
 MONITOR_HUD = {"top": 402, "left": 762, "width": 359, "height": 302}
@@ -291,7 +299,14 @@ def localizar_bola(img_bgr, cx, cy):
                     if len(historico_bola_x) >= 3:
                         dx = px - cx
                         dy = py - cy
-                        if abs(dx) <= DEAD_ZONE_BUSSOLA and abs(dy) <= DEAD_ZONE_BUSSOLA:
+                        # Cheia = alvo no hemisfério da frente da nave; oca =
+                        # hemisfério de trás. Uma bola oca perto do centro NÃO
+                        # é alinhamento -- é o alvo diretamente atrás (a
+                        # projeção cai perto do meio nesse caso) -- por isso
+                        # is_hollow tem de bloquear o ALINHADO_MACRO, senão o
+                        # código larga as teclas e reporta "alinhado" com o
+                        # nariz apontado exatamente ao contrário do alvo.
+                        if abs(dx) <= DEAD_ZONE_BUSSOLA and abs(dy) <= DEAD_ZONE_BUSSOLA and not is_hollow:
                             global _ultimo_trace_alinhado
                             agora_trace = time.time()
                             if agora_trace - _ultimo_trace_alinhado >= _INTERVALO_TRACE_ALINHADO:
@@ -307,6 +322,20 @@ def localizar_bola(img_bgr, cx, cy):
                         elif dy < -DEAD_ZONE_BUSSOLA: passos.append("W")
                         if dx > DEAD_ZONE_BUSSOLA: passos.append("D")
                         elif dx < -DEAD_ZONE_BUSSOLA: passos.append("A")
+
+                        # Bola oca mesmo em cima do centro (dx/dy dentro da
+                        # dead zone, mas is_hollow bloqueou o ALINHADO_MACRO
+                        # acima): singularidade genuína -- alvo exatamente
+                        # atrás, sem nenhuma direção "certa" a derivar da
+                        # posição. 'passos' fica vazio nesse caso, o que
+                        # deixava o chamador sem teclas nenhumas para
+                        # corrigir (ciclo preso a piscar oca sem nunca
+                        # rodar). Força uma direção fixa só para quebrar a
+                        # simetria -- a leitura seguinte já não estará
+                        # exatamente centrada e a correção normal assume.
+                        if is_hollow and not passos:
+                            passos = ["S", "D"]
+
                         comando = " + ".join(passos)
                         # Alvo "atrás" (bola oca): mesma direção de correção de
                         # sempre — o nariz tem de rodar na mesma para lá, oca ou
@@ -394,8 +423,14 @@ def aplicar_manobra_bussola(comando, dist_x, dist_y, coords_bola=None):
 
     if is_oca:
         print(f"[INFO] 8 * IMPULSO_BUSSOLA (ALVO_ATRAS): {teclas_necessarias}")
+        duracao_oca = 8 * IMPULSO_BUSSOLA
         for t in teclas_necessarias: pydirectinput.keyDown(t)
-        time.sleep(8 * IMPULSO_BUSSOLA)
+        time.sleep(duracao_oca)
+        teclas_verticais = [t for t in teclas_necessarias if t in ("w", "s")]
+        teclas_horizontais = [t for t in teclas_necessarias if t in ("a", "d")]
+        for t in teclas_verticais: pydirectinput.keyUp(t)
+        if teclas_horizontais:
+            time.sleep(duracao_oca * (FATOR_AD - 1))
         largar_todas_as_teclas()
         time.sleep(4.0)
         return
@@ -425,9 +460,15 @@ def aplicar_manobra_bussola(comando, dist_x, dist_y, coords_bola=None):
         print(f"[INFO] {multiplicador} * IMPULSO_BUSSOLA (escalada, sem progresso x{_escalada_bussola['sem_progresso']}): {teclas_necessarias}")
     else:
         print(f"[INFO] {multiplicador} * IMPULSO_BUSSOLA: {teclas_necessarias}")
+    duracao_base = multiplicador * IMPULSO_BUSSOLA
     for t in teclas_necessarias: pydirectinput.keyDown(t)
-    time.sleep(multiplicador * IMPULSO_BUSSOLA)
-    for t in teclas_necessarias: pydirectinput.keyUp(t)
+    time.sleep(duracao_base)
+    teclas_verticais = [t for t in teclas_necessarias if t in ("w", "s")]
+    teclas_horizontais = [t for t in teclas_necessarias if t in ("a", "d")]
+    for t in teclas_verticais: pydirectinput.keyUp(t)
+    if teclas_horizontais:
+        time.sleep(duracao_base * (FATOR_AD - 1))
+        for t in teclas_horizontais: pydirectinput.keyUp(t)
 
     largar_todas_as_teclas()
     time.sleep(2.0)
@@ -446,7 +487,12 @@ def aplicar_manobra_hud(dx, dy):
         print(f"[INFO] IMPULSO_HUD: {teclas}") # CORRIGIDO: Agora lista os inputs corretos
         for t in teclas: pydirectinput.keyDown(t)
         time.sleep(IMPULSO_HUD)
-        for t in teclas: pydirectinput.keyUp(t)
+        teclas_verticais = [t for t in teclas if t in ("w", "s")]
+        teclas_horizontais = [t for t in teclas if t in ("a", "d")]
+        for t in teclas_verticais: pydirectinput.keyUp(t)
+        if teclas_horizontais:
+            time.sleep(IMPULSO_HUD * (FATOR_AD - 1))
+            for t in teclas_horizontais: pydirectinput.keyUp(t)
         time.sleep(2.0) # Mantidos os 2 segundos estruturais de estabilização
 
 ROLL_DESOCLUIR_COOLDOWN = 2.0  # segundos de pausa depois do impulso

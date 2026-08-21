@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print, ED_LOG_DIR
+from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print, ED_LOG_DIR, ED_STATUS_FILE
 import time
 
 # ==========================================
@@ -104,10 +104,6 @@ def focar_jogo_seguro():
 # ==========================================
 MONITOR_MENU = {"top": 770, "left": 800, "width": 330, "height": 300}
 MONITOR_CORNER = {"top": 50, "left": 1400, "width": 500, "height": 300}
-# Canto inferior direito do HUD -- checkbox "MASS LOCKED" (calibrado a partir
-# de images/area.png). Usado como redundância visual à saída da no-fire-zone,
-# a par do evento do Journal (ver aguardar_no_fire_zone_exit).
-MONITOR_FIRE_ZONE = {"top": 890, "left": 1600, "width": 250, "height": 100}
 
 LOG_DIR = ED_LOG_DIR
 
@@ -115,6 +111,16 @@ def get_latest_log():
     list_of_files = glob.glob(os.path.join(LOG_DIR, 'Journal.*.log'))
     if not list_of_files: return None
     return max(list_of_files, key=os.path.getctime)
+
+def ler_telemetria_flags():
+    """ Lê Flags do Status.json do jogo -- mesmo mecanismo do
+    supercruise_assist.py. """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("Flags", 0)
+    except Exception:
+        return 0
 
 def obter_tamanho_atual_log():
     latest_log = get_latest_log()
@@ -158,15 +164,23 @@ templates_nomes = {
     # ~68% (abaixo do threshold de 70%) e abortar em falso. Fallback abaixo.
     'noselection_carrier': 'NO_SELECTION_CARRIER.png',
     'auto_complete': 'AUTO_LAUNCH_COMPLETE.png',
-    # Checkbox "MASS LOCKED" do HUD, ligado/desligado -- redundância visual
-    # da saída da no-fire-zone (ver MONITOR_FIRE_ZONE e
-    # aguardar_no_fire_zone_exit). Recorte apertado (só o ícone, sem o texto
-    # "MASS LOCKED", que é igual nos dois estados) -- com o texto incluído a
-    # correlação on-vs-off ficava em 0.85 (texto igual a dominar o score);
-    # só com o ícone cai para 0.61, com margem real para o threshold.
-    'fire_zone_on': 'fire-zone-on.png',
-    'fire_zone_off': 'fire-zone-off.png'
+    # Ícone de munições/heatsinks na fila de ícones do topo do menu --
+    # 'no_ammo' (ícone apagado) é o sinal para ir repor antes de descolar
+    # (ver Passo 0b) -- sem heatsinks para repor, o 'v' do plano de fuga
+    # (supercruise_assist.py) fica sem efeito quando for preciso.
+    'ammo': 'ammo.png',
+    'no_ammo': 'no_ammo.png',
+    # Mesmo ícone apagado/aviso da fila do topo do menu, mas para
+    # reparação -- mesmo tratamento do no_ammo (ver Passo 1b), só que
+    # com o seu próprio 1x 'd' + space em vez de partilhar o 2x do ammo.
+    'need_repair': 'NEED-REPAIR.png'
 }
+
+# Se False, ignora o template 'need_repair' e volta ao comportamento
+# anterior (só no_ammo, com 2x 'd' + space -- cobre às cegas por um
+# eventual aviso de reparação não verificado explicitamente). Serve de
+# válvula de escape caso o template novo dê problemas.
+VERIFICAR_NEED_REPAIR = True
 
 templates = {}
 try:
@@ -239,8 +253,104 @@ def executar_auto_launch():
     print(">>> CODE EXECUTION: MANOBRA DE UNDOCKING SEQUENCIAL")
     print("==================================================")
 
-    # Passo 0: Estabilização do HUD do Menu
-    print("A aguardar estabilização do menu...")
+    # Passo 0: Aquecer a captura de ecrã -- ANTES de qualquer tecla. A
+    # sessão PipeWire é lazy (infra_bridge._garantir_sessao) e só arranca
+    # no primeiro sct.grab() de todo o processo; se undocking.py for o
+    # primeiro script a ler o ecrã numa execução (ex: vasco.py a retomar
+    # direto nesta etapa), esse primeiro grab dispara o popup do KDE a
+    # pedir confirmação -- um passo manual que demora um tempo
+    # imprevisível. Sem este aquecimento aqui, o Passo 1 (3x 'w' + space,
+    # às cegas, sem leitura de ecrã nenhuma) disparava ANTES do popup ser
+    # confirmado -- teclas enviadas para um menu que podia nem estar
+    # estabilizado ainda, e o Passo 1b só lia o ecrã bem mais tarde,
+    # depois do utilizador confirmar o popup (confirmado em produção
+    # 2026-08-21 ~00:06). O resultado do match aqui é ignorado -- só
+    # interessa forçar a sessão a arrancar e o popup a ser respondido já.
+    procurar_template(templates['repair'], "AQUECIMENTO_CAPTURA", MONITOR_MENU, 0.85)
+
+    # Passo 0c: Deteção -- ANTES de qualquer tecla. need_repair.png exige
+    # a gota (combustível) E a chave-inglesa AMBAS acesas na fila de
+    # ícones -- a gota está SEMPRE acesa ao aterrar (gastámos combustível
+    # a chegar), por isso esta deteção só é válida no estado ORIGINAL da
+    # fila. Se detetássemos depois do Passo 1 (que confirma o
+    # abastecimento), a gota já teria mudado de estado e o need_repair
+    # deixava de bater -- confirmado em produção (2026-08-21): a gota era
+    # validada mas o need_repair falhava logo a seguir, exatamente por
+    # isto. Por isso agora: deteta tudo primeiro, decide a sequência de
+    # teclas, só depois mexe em alguma coisa.
+    if VERIFICAR_NEED_REPAIR:
+        precisa_reparar, score_reparar = procurar_template(templates['need_repair'], "NEED_REPAIR", MONITOR_MENU, 0.85)
+    else:
+        precisa_reparar, score_reparar = False, 0.0
+    sem_ammo, score_ammo = procurar_template(templates['no_ammo'], "NO_AMMO", MONITOR_MENU, 0.85)
+
+    # Passo 1: Subida Mecânica + Abastecimento -- corre logo a seguir,
+    # sem esperar pelo repair.png primeiro. repair.png é o ícone da
+    # chave-inglesa no estilo branco/cinza contornado, que só bate bem
+    # DEPOIS de tratar fuel/repair/ammo (Passo 1b) -- no menu "CARRIER
+    # SERVICES" o ícone aparece antes em laranja preenchido (mesmo estilo
+    # do NEED-REPAIR.png) e o repair.png não bate (testado: 0.799, abaixo
+    # do threshold 0.85). Ver Passo 1c mais abaixo, onde repair.png passa
+    # a confirmar depois. O 'space' final confirma sempre o combustível
+    # (a gota, primeiro ícone da fila, sempre ativa ao aterrar).
+    time.sleep(0.5)
+    print("\nA enviar comandos mecânicos: 3x 'w' + 1x 'space' (combustível)...")
+    for _ in range(3):
+        pydirectinput.press('w')
+        time.sleep(0.2)
+    pydirectinput.press('space')
+    time.sleep(0.3)
+
+    # Passo 1b: Reparação e Ammo -- com base na deteção do Passo 0c. Cada
+    # 'd' avança um ícone na fila (fuel -> repair -> ammo); sem
+    # necessidade de reparar, são precisos 2x 'd' seguidos para saltar
+    # diretamente do fuel para o ammo. Sem isto, o 'v' (heatsink) do
+    # plano de fuga (supercruise_assist.py) fica sem efeito na próxima
+    # interdição. Com VERIFICAR_NEED_REPAIR=False, precisa_reparar nunca
+    # é True, e ammo sozinho usa sempre o caminho de 2x 'd' + space
+    # (cobre às cegas por um eventual aviso de reparação não verificado).
+    if precisa_reparar:
+        print(f"\nNecessita reparação ({score_reparar*100:.1f}%) -- a confirmar (1x 'd' + space)...")
+        # 'd' aqui é a PRIMEIRA interação com a fila de ícones (cursor
+        # começa no fuel, repair é +1 'd'). Testado em produção
+        # (2026-08-21): com 0.2s entre 'd' e 'space', o space confirmava
+        # fuel em vez de repair -- o cursor parece não ter tido tempo de
+        # mudar de ícone ainda. Intervalo maior aqui.
+        pydirectinput.press('d')
+        time.sleep(0.4)
+        pydirectinput.press('space')
+        time.sleep(0.5)
+
+        if sem_ammo:
+            print(f"\nSem stock de Ammo/Heatsinks ({score_ammo*100:.1f}%) -- a repor (1x 'd' + space)...")
+            pydirectinput.press('d')
+            time.sleep(0.2)
+            pydirectinput.press('space')
+            time.sleep(0.5)
+        else:
+            # Sem ação de ammo a seguir -- a sequência terminaria mesmo em
+            # cima do ícone de reparação, que fica "iluminado"/selecionado
+            # e impede a validação de NO_SELECTION mais à frente (Passo
+            # 2). Ao contrário do ammo (que já terminava a fila sem este
+            # problema antes desta mudança), o repair fica preso
+            # selecionado -- um 'd' extra tira o foco de lá.
+            print("\nA sair do ícone de reparação (1x 'd') para permitir NO_SELECTION...")
+            pydirectinput.press('d')
+            time.sleep(0.3)
+    elif sem_ammo:
+        print(f"\nSem stock de Ammo/Heatsinks ({score_ammo*100:.1f}%) -- a repor (2x 'd' + space)...")
+        pydirectinput.press('d')
+        time.sleep(0.2)
+        pydirectinput.press('d')
+        time.sleep(0.2)
+        pydirectinput.press('space')
+        time.sleep(0.5)
+
+    # Passo 1c: Estabilização do HUD do Menu -- movido para depois do
+    # Passo 1b (era Passo 0, antes de tudo). repair.png só serve de
+    # referência fiável depois de fuel/repair/ammo estarem tratados (ver
+    # nota no Passo 1).
+    print("\nA aguardar estabilização do menu...")
     timeout_menu = time.time() + 15  # Watchdog de 15 segundos
     while True:
         if time.time() > timeout_menu:
@@ -252,14 +362,6 @@ def executar_auto_launch():
         time.sleep(0.3)
 
     time.sleep(0.5)
-
-    # Passo 1: Subida Mecânica
-    print("\nA enviar comandos mecânicos: 3x 'w' + 1x 'space'...")
-    for _ in range(3):
-        pydirectinput.press('w')
-        time.sleep(0.2)
-    pydirectinput.press('space')
-    time.sleep(0.3)
 
     # Passo 2: Validação Cega
     print("\nA validar 'NO_SELECTION' no topo do menu...")
@@ -354,17 +456,22 @@ def aguardar_saida_estacao():
     falar("Auto launch terminated commander.")
 
 def sequencia_salto():
+    # Sem 'x' aqui -- este código é de quando o OLHO corria logo a seguir
+    # ao undocking e precisava da nave parada para alinhar (arquitetura
+    # antiga). Agora o alinhamento passou para dentro do
+    # supercruise_assist.py, corrido só depois de entrar em Supercruise
+    # (ver _alinhar_com_olho) -- não faz sentido parar aqui só para voltar
+    # a acelerar a seguir; o 'x' só deve acontecer logo a seguir a ENTRAR
+    # em Supercruise.
     print("\n>>> FASE: Impulso de Saída...")
     pydirectinput.keyDown('.')
     time.sleep(5)
     pydirectinput.keyUp('.')
     pydirectinput.press('tab')
     time.sleep(15.0)
-    pydirectinput.press('x')
-    time.sleep(8.0)
 
-FIRE_ZONE_VISUAL_THRESHOLD = 0.85  # separacao real: self-match ~1.0, cross on/off ~0.61 (ver comentario em templates_nomes)
-FIRE_ZONE_VISUAL_CONFIRMACOES = 2  # deteções consecutivas exigidas antes de aceitar o sinal visual (evita 1 frame de ruído)
+FSD_MASS_LOCKED_FLAG = 0x10000
+MASS_LOCK_CONFIRMACOES = 2  # deteções consecutivas exigidas antes de aceitar o sinal (evita 1 leitura a meio da escrita do ficheiro)
 
 def aguardar_no_fire_zone_exit(ancora_log, timeout=60):
     """ Gate final antes de entregar o controlo ao OLHO: a deteção visual do
@@ -375,21 +482,23 @@ def aguardar_no_fire_zone_exit(ancora_log, timeout=60):
 
     Redundância: já aconteceu o Journal simplesmente parar de escrever
     eventos a meio da manobra (sessão presa) e este gate nunca confirmar,
-    mesmo com a nave já fora da no-fire-zone. Por isso também aceitamos o
-    checkbox "MASS LOCKED" do HUD (MONITOR_FIRE_ZONE) a passar a
-    desmarcado -- sinal de estado em tempo real, não uma notificação
-    pontual, por isso não tem o mesmo risco de falso positivo do
-    AUTO_COMPLETE. Exige duas deteções seguidas para não confiar num único
-    frame de ruído.
+    mesmo com a nave já fora da no-fire-zone. Por isso também aceitamos a
+    flag FSD_MASS_LOCKED da telemetria (Status.json) a desligar-se -- sinal
+    de estado em tempo real e autoritativo (o próprio jogo, sem depender de
+    OCR/visão), por isso não tem o mesmo risco de falso positivo do
+    AUTO_COMPLETE. (Chegámos a usar um checkbox "MASS LOCKED" do HUD por
+    visão para o mesmo efeito -- a telemetria é o mesmo sinal, direto da
+    fonte, sem depender de captura de ecrã.) Exige duas leituras seguidas
+    para não confiar numa única leitura a meio da escrita do ficheiro.
 
     Se a nave estiver mesmo presa em trânsito (raro) e nenhum dos dois sinais
     confirmar, abortamos como qualquer outra falha desta máquina de estados
     -- não vale a pena complicar com lógica de recuperação para um caso raro;
     aceitar o prejuízo e deixar o 'a' (modo automático) tentar de novo é mais
     barato. """
-    print(f"\n>>> FASE: A confirmar saída da no-fire-zone via Journal + Visão (timeout {timeout}s)...")
+    print(f"\n>>> FASE: A confirmar saída da no-fire-zone via Journal + Telemetria (timeout {timeout}s)...")
     timeout_real = time.time() + timeout
-    confirmacoes_visuais = 0
+    confirmacoes_mass_lock = 0
 
     while time.time() < timeout_real:
         for evento in ler_novos_eventos(ancora_log):
@@ -398,20 +507,20 @@ def aguardar_no_fire_zone_exit(ancora_log, timeout=60):
                 _logger.info("No fire zone exited confirmado (Journal) -- handoff para OLHO autorizado.")
                 return True
 
-        saiu_visualmente, score_visual = procurar_template(templates['fire_zone_off'], "FIRE_ZONE_OFF", MONITOR_FIRE_ZONE, FIRE_ZONE_VISUAL_THRESHOLD)
-        if saiu_visualmente:
-            confirmacoes_visuais += 1
-            if confirmacoes_visuais >= FIRE_ZONE_VISUAL_CONFIRMACOES:
-                print(f"[OK] 'No fire zone exited' confirmado pela Visão ({score_visual*100:.1f}%) -- Journal não confirmou a tempo.")
-                _logger.info(f"No fire zone exited confirmado (Visao, {score_visual*100:.1f}%) -- handoff para OLHO autorizado.")
+        flags = ler_telemetria_flags()
+        if not bool(flags & FSD_MASS_LOCKED_FLAG):
+            confirmacoes_mass_lock += 1
+            if confirmacoes_mass_lock >= MASS_LOCK_CONFIRMACOES:
+                print("[OK] 'No fire zone exited' confirmado pela telemetria (FSD_MASS_LOCKED desligado) -- Journal não confirmou a tempo.")
+                _logger.info("No fire zone exited confirmado (Telemetria FSD_MASS_LOCKED) -- handoff para OLHO autorizado.")
                 return True
         else:
-            confirmacoes_visuais = 0
+            confirmacoes_mass_lock = 0
 
         time.sleep(0.5)
 
     falar("Warning. Still inside station no fire zone.")
-    abortar_com_erro("Timeout à espera de 'No fire zone exited' no Journal/Visão. A nave pode estar presa/bloqueada perto da estação.")
+    abortar_com_erro("Timeout à espera de 'No fire zone exited' no Journal/Telemetria. A nave pode estar presa/bloqueada perto da estação.")
 
 # ==========================================
 # 4. EXECUÇÃO PRINCIPAL

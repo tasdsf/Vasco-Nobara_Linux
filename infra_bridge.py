@@ -17,10 +17,12 @@ Exports públicos:
     ED_STATUS_FILE  - path do Status.json do Elite
     SCREEN_BACKEND  - string de diagnóstico do backend ativo
     KEYBOARD_BACKEND- string de diagnóstico do teclado
+    notificar_erro_discord - envia um erro para o Discord (ver DISCORD_WEBHOOK_URL no .env)
 """
 
 import os
 import sys
+import json as _json
 import math
 import uuid
 import wave
@@ -543,3 +545,87 @@ ED_STATUS_FILE = os.path.join(ED_LOG_DIR, "Status.json")
 if not os.path.isdir(ED_LOG_DIR):
     print(f"[BRIDGE] AVISO: ED_LOG_DIR não encontrado: {ED_LOG_DIR}\n"
           "  Override: export ED_LOG_DIR=/caminho/correto")
+
+# =====================================================================
+# 7. NOTIFICAÇÕES DISCORD (erros)
+# =====================================================================
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except Exception:
+    pass
+
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+# Identifica a máquina de origem nas notificações -- o webhook é partilhado
+# entre este lado (Linux/Nobara) e o lado Windows, por isso as mensagens
+# precisam de dizer de onde vieram. Override via .env se preciso (o lado
+# Windows deve definir VASCO_HOST_ID=vasco-r2d2-win).
+HOST_ID = os.environ.get("VASCO_HOST_ID", "vasco-r2d2-nobara")
+
+def notificar_erro_discord(origem, mensagem, imagem_path=None):
+    """ Envia uma notificação de erro para o Discord via webhook (URL em
+    DISCORD_WEBHOOK_URL, ver .env). Best-effort -- nunca deve derrubar o
+    chamador: qualquer falha (webhook não configurado, sem rede, timeout)
+    fica só registada na consola, nunca levanta exceção.
+
+    origem       -- identifica o script/etapa que falhou (ex:
+                     "supercruise_assist.py").
+    mensagem     -- texto do erro.
+    imagem_path  -- caminho opcional de um PNG a anexar (ex: o screenshot
+                     automático de abortar_com_erro em supercruise_assist.py);
+                     se não existir, envia só o texto. """
+    if not DISCORD_WEBHOOK_URL:
+        print("[DISCORD] DISCORD_WEBHOOK_URL não definido -- notificação não enviada.")
+        return False
+    try:
+        import requests
+        payload = {"content": f"🔴 **[{HOST_ID}] {origem}**\n{mensagem}"}
+        if imagem_path and os.path.exists(imagem_path):
+            with open(imagem_path, "rb") as f:
+                resp = requests.post(
+                    DISCORD_WEBHOOK_URL,
+                    data={"payload_json": _json.dumps(payload)},
+                    files={"file": (os.path.basename(imagem_path), f, "image/png")},
+                    timeout=10,
+                )
+        else:
+            resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        if resp.status_code not in (200, 204):
+            print(f"[DISCORD] Falha ao enviar notificação: {resp.status_code} {resp.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[DISCORD] Falha ao enviar notificação: {e}")
+        return False
+
+# =====================================================================
+# 8. ESTADO PARTILHADO: "PERNA LIMPA" (para o auto-registo de LOS)
+# =====================================================================
+# vasco.py corre todas as etapas no mesmo processo (ver _obter_modulo em
+# vasco.py), por isso um simples global neste módulo é visível por todos
+# os scripts sem precisar de ficheiro/BD. Serve só para
+# registar_los_visivel_auto() (supercruise_assist.py) saber se a perna
+# undocking->supercruise atual correu sem nenhum erro/retry -- 2026-08-20:
+# 88% das observações automáticas de LOS estavam a afogar as poucas
+# manuais/fiáveis no ajuste do los_checker, e não há garantia nenhuma de
+# que um salto bem-sucedido implique LOS realmente desimpedida (o
+# diagnóstico de oclusão só corre quando o salto FALHA -- "sucesso" só
+# significa "não precisou de diagnosticar"). Só vale a pena confiar numa
+# observação automática se a perna toda correu sem intervenção nenhuma.
+_leg_limpa = True
+
+def reiniciar_leg_limpa():
+    """ Chamado por vasco.py mesmo antes de cada UNDOCKING (início de
+    perna) -- volta a dar o benefício da dúvida à próxima perna. """
+    global _leg_limpa
+    _leg_limpa = True
+
+def marcar_leg_suja():
+    """ Chamado por vasco.py sempre que uma etapa tem qualquer exceção
+    (mesmo que uma tentativa seguinte tenha sucesso) -- uma vez suja,
+    fica suja até ao próximo reiniciar_leg_limpa(). """
+    global _leg_limpa
+    _leg_limpa = False
+
+def leg_esta_limpa():
+    return _leg_limpa

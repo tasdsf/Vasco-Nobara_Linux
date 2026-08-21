@@ -56,13 +56,13 @@
     },
     "Mediumtransport01": {
         "MONITOR_CONFIG": {
-            "top": 835,
+            "top": 833,
             "left": 721,
             "width": 58,
             "height": 68
         },
         "CX_NEUTRO": 29,
-        "CY_NEUTRO": 34,
-        "LIMIAR_THRESH": 136
+        "CY_NEUTRO": 37,
+        "LIMIAR_THRESH": 110
     }
 }

@@ -156,7 +156,24 @@ def _calibrar_fase_periodo(observacoes, k):
         return None, 0.0, math.pi, k["periodo_carrier"]
 
     epoch = min(timestamps)
-    obs_validas = [o for o in observacoes if o.get('estado') in ('visivel', 'oclusos')]
+    # Só observações verificadas por um humano ('linux'/'win', via
+    # los_calibrar.py ou CLI) entram no ajuste -- as automáticas
+    # ('auto-linux'/'auto-win', registadas só porque um salto de
+    # supercruise correu bem, ver registar_los_visivel_auto() em
+    # supercruise_assist.py) são um sinal fraco por definição ("pelo sim
+    # pelo nao: pode ter tido ajuda do utilizador") e em produção chegaram
+    # a ser 88% do total -- afogavam as poucas observações manuais e o
+    # ajuste passava a prever "visivel" mesmo com observações manuais
+    # recentes a dizer "oclusos" (confirmado 2026-08-20 ~15:36: 3
+    # observações manuais seguidas de "oclusos" todas previstas como
+    # visivel; ao filtrar para só as 62 manuais, a previsão para "agora"
+    # já batia certo -- 57/62 corretas, período quase idêntico ao do
+    # conjunto completo, confirmando que as automáticas não acrescentavam
+    # informação, só ruído).
+    obs_validas = [
+        o for o in observacoes
+        if o.get('estado') in ('visivel', 'oclusos') and o.get('origem', '') in ('linux', 'win')
+    ]
     if not obs_validas:
         return epoch, 0.0, math.pi, k["periodo_carrier"]
 
@@ -331,7 +348,7 @@ def _carregar_observacoes_bd(sistema):
             _garantir_tabela(cur)
             conn.commit()
             cur.execute(
-                "SELECT timestamp_utc, estado, nota FROM los_observacoes "
+                "SELECT timestamp_utc, estado, nota, origem FROM los_observacoes "
                 "WHERE sistema = %s ORDER BY timestamp_utc",
                 (sistema,)
             )
@@ -340,11 +357,12 @@ def _carregar_observacoes_bd(sistema):
         conn.close()
 
     observacoes = []
-    for ts, estado, nota in linhas:
+    for ts, estado, nota, origem in linhas:
         observacoes.append({
             "timestamp_utc": ts.astimezone(timezone.utc).isoformat(),
             "estado": estado,
             "nota": nota or "",
+            "origem": origem or "",
         })
     return observacoes
 

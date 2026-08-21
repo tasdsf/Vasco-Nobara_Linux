@@ -26,6 +26,10 @@ else:
 diretorio_atual = os.path.dirname(os.path.abspath(__file__))
 pasta_logs = os.path.join(diretorio_atual, "logs")
 os.makedirs(pasta_logs, exist_ok=True)
+# Última captura de procurar_template(), sobrescrita a cada chamada -- dá
+# evidência forense de qualquer falha sem depender de VISUAL_DEBUG (mesmo
+# padrão do undocking.py/select_target.py/comprar.py).
+log_test = os.path.join(pasta_logs, "docking_test.png")
 
 # Logger proprio (nao usa logging.basicConfig -- com varios scripts no mesmo
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
@@ -113,6 +117,10 @@ LOG_DIR = ED_LOG_DIR
 pasta_imagens = os.path.join(diretorio_atual, 'images')
 templates_nomes = {
     'contacts_tab': 'CONTACTS.png',
+    # Âncora para a redundância de navegação entre abas -- ver
+    # navegar_para_aba() -- já testada e fiável noutros scripts
+    # (select_target.py, supercruise_assist.py).
+    'nav_tab': 'NAVIGATION_SELECTED.png',
     'docking_off': 'REQUEST_DOCKING_OFF.png',
     'docking_on': 'REQUEST_DOCKING_ON.png',
     'repair': 'repair.png'
@@ -136,6 +144,7 @@ def procurar_template(template, nome_label, threshold=0.80):
     with mss.mss() as sct:
         img_bgra = np.array(sct.grab(MONITOR_PANEL))
         img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(log_test, img_bgr)
         resultado = cv2.matchTemplate(img_bgr, template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
         encontrou = max_val >= threshold
@@ -152,6 +161,33 @@ def procurar_template(template, nome_label, threshold=0.80):
             cv2.waitKey(1)
             
         return encontrou
+
+def navegar_para_aba(template_alvo, nome_alvo, tecla_ciclo, passos_desde_nav, tentativas=6):
+    """ Procura a aba 'nome_alvo' ciclando com 'tecla_ciclo'. Se falhar em
+    'tentativas', usa uma âncora: procura a aba NAVIGATION (mesmo template
+    já fiável em select_target.py/supercruise_assist.py) e, se a
+    confirmar, navega um número FIXO de passos a partir dela -- o layout
+    das abas é fixo (NAVIGATION / TRANSACTIONS / CONTACTS) -- em vez de
+    continuar a confiar cegamente no template da aba alvo, que pode estar
+    a falhar por outro motivo (oclusão, iluminação, etc.). Com a âncora
+    confirmada, não há outra hipótese de errar que aterramos na aba certa. """
+    for _ in range(tentativas):
+        if procurar_template(template_alvo, nome_alvo, 0.65):
+            return True
+        pydirectinput.press(tecla_ciclo)
+        time.sleep(0.6)
+
+    print(f"[AVISO] Não detetei a aba {nome_alvo} diretamente -- a tentar âncora via NAVIGATION.")
+    if not procurar_template(templates['nav_tab'], "NAV TAB (ANCORA)", 0.61):
+        print("[AVISO] Âncora NAVIGATION também não confirmada.")
+        return False
+
+    print(f"[LOG] Âncora NAVIGATION confirmada -- a navegar {passos_desde_nav}x '{tecla_ciclo}' até {nome_alvo}.")
+    for _ in range(passos_desde_nav):
+        pydirectinput.press(tecla_ciclo)
+        time.sleep(0.6)
+
+    return procurar_template(template_alvo, nome_alvo, 0.65)
 
 # ==========================================
 # 3. MOTOR DE LOGS COM CURSOR DINÂMICO
@@ -243,15 +279,13 @@ def solicitar_docking():
         pydirectinput.press('1')
         time.sleep(1.2)
         
-        aba_encontrada = False
-        for _ in range(6):
-            if procurar_template(templates['contacts_tab'], "CONTACTS", 0.65):
-                print("[LOG] Aba Contacts confirmada!")
-                aba_encontrada = True
-                break
-            pydirectinput.press('e')
-            time.sleep(0.6)
-        
+        # 2 passos de 'e' a partir de NAVIGATION chega sempre a CONTACTS
+        # (layout fixo do painel: NAVIGATION / TRANSACTIONS / CONTACTS) --
+        # ver navegar_para_aba().
+        aba_encontrada = navegar_para_aba(templates['contacts_tab'], "CONTACTS", 'e', 2)
+        if aba_encontrada:
+            print("[LOG] Aba Contacts confirmada!")
+
         if not aba_encontrada:
             msg = "[ERRO] Não detetei a aba Contacts. Tentando reiniciar ciclo..."
             print(msg)

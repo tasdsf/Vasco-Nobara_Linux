@@ -17,6 +17,8 @@ from pathlib import Path
 from infra_bridge import keyboard
 from los_checker import calcular_espera_los
 from infra_bridge import ED_LOG_DIR
+from infra_bridge import notificar_erro_discord
+from infra_bridge import reiniciar_leg_limpa, marcar_leg_suja
 from infra_bridge import print_ts as print
 import time
 
@@ -101,18 +103,22 @@ SCRIPTS = {
 }
 
 SEQUENCE = {
+    # OLHO deixou de ser etapa própria (2026-08-19): o alinhamento passou
+    # para dentro do supercruise_assist.py (_alinhar_com_olho), corrido
+    # sempre depois do salto + Supercruise Assist ligado -- não faz
+    # sentido alinhar antes de saltar (entrar em Supercruise não exige
+    # apontar a nada) nem sem o Assist ligado (o alvo centra muito mais
+    # depressa com ele ligado).
     1: {"name": "COMPRAR", "script": SCRIPTS["comprar"], "desc": "Comprar Fujin Tea na estacao atual"},
     2: {"name": "TARGET_CARRIER", "script": SCRIPTS["target_carrier"], "desc": "Selecionar Zahir como destino"},
     3: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
-    4: {"name": "OLHO", "script": SCRIPTS["olho"], "desc": "Verificar status da mira/reticule"},
-    5: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
-    6: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
-    7: {"name": "VENDER", "script": SCRIPTS["vender"], "desc": "Vender Fujin Tea no Zahir"},
-    8: {"name": "SELECT_STATION", "script": SCRIPTS["station"], "desc": "Selecionar estacao de origem"},
-    9: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
-    10: {"name": "OLHO", "script": SCRIPTS["olho"], "desc": "Verificar status da mira/reticule"},
-    11: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
-    12: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
+    4: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
+    5: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
+    6: {"name": "VENDER", "script": SCRIPTS["vender"], "desc": "Vender Fujin Tea no Zahir"},
+    7: {"name": "SELECT_STATION", "script": SCRIPTS["station"], "desc": "Selecionar estacao de origem"},
+    8: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
+    9: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
+    10: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
 }
 
 _modulos_carregados = {}
@@ -177,9 +183,11 @@ def executar_script(script_name, retry_count=3, retry_delay=5, **_ignorado):
                 return True, "Sucesso", "OK"
             error_msg = f"Exit code: {codigo}"
             logger.error(f"Etapa {script_name} falhou: {error_msg}")
+            marcar_leg_suja()
         except Exception as e:
             error_msg = f"Excecao: {e}"
             logger.exception(f"Erro na etapa {script_name}: {e}")
+            marcar_leg_suja()
         finally:
             # Sem isto, janelas cv2 abertas por uma etapa (ex: olho.py, que tem
             # VISUAL_DEBUG=True) ficam orfas -- no subprocess antigo, o fim do
@@ -192,8 +200,27 @@ def executar_script(script_name, retry_count=3, retry_delay=5, **_ignorado):
             time.sleep(retry_delay)
         else:
             print(f"\n[ERRO] Max retries atingido. Falha: {error_msg[:200]}")
+            _notificar_falha_discord(script_name, error_msg)
 
     return False, error_msg, "MAX_RETRIES"
+
+def _notificar_falha_discord(script_name, error_msg):
+    """ Notifica o Discord só quando uma etapa esgota TODOS os retries (não
+    em cada tentativa individual -- isso inundava o canal). Único ponto de
+    integração para todas as etapas (comprar/select_target/undocking/
+    supercruise_assist/docking/vender) em vez de mexer em cada script.
+
+    Anexa o screenshot de erro mais recente (logs/erro_*.png, gravado
+    automaticamente por abortar_com_erro em supercruise_assist.py) se
+    tiver menos de 30s -- só se for mesmo desta falha, não de uma
+    anterior. Best-effort: nunca pode impedir o vasco.py de continuar. """
+    try:
+        pasta_logs = SCRIPT_DIR / "logs"
+        candidatos = sorted(pasta_logs.glob("erro_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        imagem_path = str(candidatos[0]) if candidatos and (time.time() - candidatos[0].stat().st_mtime) < 30 else None
+        notificar_erro_discord(script_name, error_msg, imagem_path)
+    except Exception as e:
+        print(f"[AVISO] Falha ao notificar Discord: {e}")
 
 def main():
     adquirir_lock_unico()
@@ -246,7 +273,13 @@ def main():
             print(f"[ETAPA {current_step}] {step_info['name']}: {step_info['desc']}")
             print()
 
-            if current_step in (9,3):
+            if current_step in (8,3):  # UNDOCKING das duas pernas (era 9,3 antes da renumeracao 2026-08-19)
+                # Reinicia o estado "perna limpa" aqui -- início da perna
+                # undocking->supercruise. Só um salto que chegue ao fim
+                # desta perna sem nenhum erro/retry (nem aqui, nem no
+                # SUPERCRUISE a seguir) conta como observação de LOS
+                # automática de confiança (ver infra_bridge.py).
+                reiniciar_leg_limpa()
                 espera = calcular_espera_los(ed_log_dir=ED_LOG_DIR)
                 if espera and espera > 0:
                     h, resto = divmod(int(espera), 3600)
@@ -267,62 +300,82 @@ def main():
                 save_state(current_step, success=True, completed_steps=completed_steps)
                 current_step += 1
             else:
-                # Falha - requer intervencao
-                print(f"\n[FASSA DETECTADA] Etapa {current_step} ({step_info['name']}): {error_msg}")
-                print(f"Opcoes:")
-                print("  1 - Retry manual (ignora erros anteriores)")
-                print("  2 - Fallback (operação cega, executada manualmente)")
-                print("  3 - Menu Manual (executar via menu.py)")
-                print("  4 - Skip (pular, continuar)")
-                print("  5 - Cancelar (abortar)")
-                
-                try:
-                    choice = input(f"\nEscolha (1-5): ").strip()
-                    logger.info(f"User choice: {choice} for step {current_step}")
-                    
-                    if choice == "1":
-                        print("Retry manual solicitado...")
-                        success, _, _ = executar_script(step_info["script"])
-                        if success:
-                            print(f"[SUCESSO] Retry manual bem sucedido!")
+                # Falha - requer intervencao. Fica neste prompt em loop
+                # enquanto o "Retry manual" (escolha 1) continuar a falhar --
+                # antes disto, uma retry falhada marcava a etapa como
+                # concluida na mesma ("mas continuamos") e avancava para a
+                # etapa seguinte com o trabalho desta por fazer (bug real:
+                # 2026-08-19 20:13, TARGET_CARRIER falhou o retry manual e o
+                # UNDOCKING seguinte avancou sem nenhum alvo trancado).
+                cancelar_automacao = False
+                while True:
+                    print(f"\n[FASSA DETECTADA] Etapa {current_step} ({step_info['name']}): {error_msg}")
+                    print(f"Opcoes:")
+                    print("  1 - Retry manual (ignora erros anteriores)")
+                    print("  2 - Fallback (operação cega, executada manualmente)")
+                    print("  3 - Menu Manual (executar via menu.py)")
+                    print("  4 - Skip (pular, continuar)")
+                    print("  5 - Cancelar (abortar)")
+
+                    try:
+                        choice = input(f"\nEscolha (1-5): ").strip()
+                        logger.info(f"User choice: {choice} for step {current_step}")
+
+                        if choice == "1":
+                            print("Retry manual solicitado...")
+                            success, error_msg, _ = executar_script(step_info["script"])
+                            if success:
+                                print(f"[SUCESSO] Retry manual bem sucedido!")
+                                completed_steps.append(current_step)
+                                save_state(current_step, success=True, completed_steps=completed_steps)
+                                current_step += 1
+                                break
+                            else:
+                                print(f"[AVISO] Retry manual falhou: {error_msg} -- a voltar a perguntar.")
+                                continue
+
+                        elif choice == "2":
+                            print("Fallback manual. Abra (script).py manualmente.")
+                            print("Esta vende sem identificar o item.")
+                            time.sleep(3)
+                            completed_steps.append(current_step)
+                            save_state(current_step, success=True, completed_steps=completed_steps)
+                            current_step += 1
+                            break
+
+                        elif choice == "3":
+                            print("Execucao via menu solicitada. Use menu.py normalmente.")
+                            print("Pressione Enter quando terminar...")
+                            input()
+                            current_step += 1
+                            break
+
+                        elif choice == "4":
+                            print(f"[SKIP] Etapa {step_info['name']} pulada.")
+                            completed_steps.append(current_step)
+                            save_state(current_step, success=True, completed_steps=completed_steps)
+                            current_step += 1
+                            break
+
+                        elif choice == "5": # Abort solicitado pelo utilizador
+                            print("[VASCO] A cancelar automação...")
+                            cancelar_automacao = True
+                            break
+
                         else:
-                            print("[AVISO] Retry manual falhou, mas continuamos")
-                        completed_steps.append(current_step)
-                        save_state(current_step, success=True, completed_steps=completed_steps)
-                        current_step += 1
-                        
-                    elif choice == "2":
-                        print("Fallback manual. Abra (script).py manualmente.")
-                        print("Esta vende sem identificar o item.")
-                        time.sleep(3)
-                        completed_steps.append(current_step)
-                        save_state(current_step, success=True, completed_steps=completed_steps)
-                        current_step += 1
-                        
-                    elif choice == "3":
-                        print("Execucao via menu solicitada. Use menu.py normalmente.")
-                        print("Pressione Enter quando terminar...")
-                        input()
-                        current_step += 1
-                        
-                    elif choice == "4":
-                        print(f"[SKIP] Etapa {step_info['name']} pulada.")
-                        completed_steps.append(current_step)
-                        save_state(current_step, success=True, completed_steps=completed_steps)
-                        current_step += 1
-                        
-                    elif choice == "5": # Abort solicitado pelo utilizador
-                        print("[VASCO] A cancelar automação...")
+                            print("Opcao invalida. Tente novamente.")
+                            continue
+
+                    except KeyboardInterrupt:
+                        print("\nCancelado por Ctrl+C")
+                        cancelar_automacao = True
                         break
-                        
-                    else:
-                        print("Opcao invalida. Tente novamente.")
-                    
-                except KeyboardInterrupt:
-                    print("\nCancelado por Ctrl+C")
+                    except ValueError:
+                        print("Opcao invalida.")
+                        continue
+
+                if cancelar_automacao:
                     break
-                except ValueError:
-                    print("Opcao invalida.")
         
         # Finalizacao
         print_header()
