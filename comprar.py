@@ -351,9 +351,42 @@ def fase_3_comprar_item():
             pydirectinput.press('space')
             print("\n[DEBUG] comprou <space>")
             _logger.info("Comprou -- carregou no SPACE para confirmar a compra.")
-            time.sleep(2.0)
 
-            compra_confirmada = aguardar_confirmacao_compra(ancora_journal)
+            # Verificação rápida (5s): o botão BUY fica desativado assim
+            # que a compra regista (impede duplo-clique) -- muito mais
+            # rápido do que esperar pelo journal (até 30s). Só vale a pena
+            # ir ao journal se o botão realmente tiver desativado; se
+            # continuar ativo ao fim de 5s, o space provavelmente não
+            # registou -- tenta outra vez em vez de esperar pelo journal
+            # para uma compra que nunca aconteceu. Confirmado em produção
+            # (2026-08-21): quantidade no máximo, BUY selecionado, space
+            # enviado (visto no log), mas nada comprado -- o botão
+            # continuava selecionado.
+            def _botao_buy_desativou(timeout=5.0):
+                tempo_fim = time.time() + timeout
+                while time.time() < tempo_fim:
+                    if not procurar_template(templates['buy_button_on'], "BUY BUTTON (a verificar desativação)", MONITOR_MARKET, 0.80):
+                        return True
+                    time.sleep(0.3)
+                return False
+
+            botao_desativou = _botao_buy_desativou()
+            tentativas_recuperacao = 0
+            while not botao_desativou and tentativas_recuperacao < 3:
+                tentativas_recuperacao += 1
+                print(f"\n[RECUPERAÇÃO] Botão BUY continua ativo ao fim de 5s -- "
+                      f"a tentar outra vez (tentativa {tentativas_recuperacao}/3)...")
+                ancora_journal = obter_tamanho_atual_log()
+                pydirectinput.press('space')
+                print("\n[DEBUG] comprou <space> (recuperação)")
+                botao_desativou = _botao_buy_desativou()
+
+            if botao_desativou:
+                compra_confirmada = aguardar_confirmacao_compra(ancora_journal)
+            else:
+                print("[AVISO] Botão BUY nunca desativou -- compra provavelmente nunca registou.")
+                compra_confirmada = False
+
             if compra_confirmada:
                 _logger.info("Compra confirmada pelo journal (MarketBuy detetado).")
             else:
