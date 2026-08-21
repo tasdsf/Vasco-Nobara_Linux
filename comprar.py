@@ -120,6 +120,7 @@ templates_nomes = {
     'market_off': 'COMMODITIES_MARKET_OFF.png',
     'market_on': 'COMMODITIES_MARKET_ON.png',
     'buy_on': 'BUY_SELECTED.png',
+    'buy_button_on': 'BUY_BUTTON.png',
     'rare_on': 'RARE_SELECTED.png',
     'exit_on': 'EXIT_SELECTED.png'
 }
@@ -239,16 +240,43 @@ def fase_1_entrar_servicos():
         time.sleep(0.5)
 
     time.sleep(1.2)
-    for tecla in ['s', 's', 'w', 'w']:
-        if (procurar_template(templates['servicos'], "SERVICES", MONITOR_MENU, 0.70) or
-                procurar_template(templates['servicos_carrier'], "SERVICES (CARRIER)", MONITOR_MENU, 0.70) or
-                procurar_template(templates['servicos_selecionado'], "SERVICES (SELECIONADO)", MONITOR_MENU, 0.80)):
-            pydirectinput.press('space')
-            return True
-        pydirectinput.press(tecla)
-        time.sleep(0.6)
 
-    abortar_com_erro("Botão 'Starport/Carrier Services' não detetado após a sequência mecânica de focagem.")
+    # Varrimento mecânico do botão Services -- por tempo (não por um número
+    # fixo de teclas), mesma regra do NAVIGATION em
+    # engatar_assistencia_menu() (supercruise_assist.py): 10s na primeira
+    # tentativa; se não bater, fecha (2x backspace) e tenta outra vez com
+    # mais 5s; se mesmo assim não bater, algo está muito errado -- aborta
+    # em vez de continuar às cegas. Intervalo entre teclas subido de 0.6s
+    # para 0.9s -- teclas andavam a falhar na ida ao mercado, possivelmente
+    # por serem enviadas depressa demais para o jogo registar.
+    def _tentar_focar_servicos(timeout):
+        teclas_ciclo = ['s', 's', 'w', 'w']
+        tempo_fim = time.time() + timeout
+        i = 0
+        while time.time() < tempo_fim:
+            if (procurar_template(templates['servicos'], "SERVICES", MONITOR_MENU, 0.70) or
+                    procurar_template(templates['servicos_carrier'], "SERVICES (CARRIER)", MONITOR_MENU, 0.70) or
+                    procurar_template(templates['servicos_selecionado'], "SERVICES (SELECIONADO)", MONITOR_MENU, 0.80)):
+                pydirectinput.press('space')
+                return True
+            pydirectinput.press(teclas_ciclo[i % len(teclas_ciclo)])
+            i += 1
+            time.sleep(0.9)
+        return False
+
+    if _tentar_focar_servicos(10.0):
+        return True
+
+    print("[AVISO] Botão Services não detetado em 10s -- a fechar e a tentar outra vez...")
+    for _ in range(4):
+        pydirectinput.press('backspace')
+        time.sleep(0.3)
+    time.sleep(0.5)
+
+    if _tentar_focar_servicos(5.0):
+        return True
+
+    abortar_com_erro("Botão 'Starport/Carrier Services' não detetado mesmo depois de reabrir -- algo está muito errado.")
 
 def fase_2_abrir_mercado():
     print("\n>>> FASE 2: Abrindo Mercado...")
@@ -296,10 +324,28 @@ def fase_3_comprar_item():
             pydirectinput.keyDown('d')
             time.sleep(2.5)
             pydirectinput.keyUp('d')
-            time.sleep(1.0)
-            pydirectinput.press('s')
-            print("\n[DEBUG] desceu <s>")
-            time.sleep(1.0)
+            # 1.5s (subido de 1.0s) -- dar tempo ao jogo de assentar depois
+            # do hold longo de 'd' (2.5s), antes de mandar mais teclas.
+            time.sleep(1.5)
+
+            # Confirma que o foco chegou mesmo ao botão BUY antes de
+            # confirmar a compra -- sem isto, um 's' que não registasse
+            # (enviado cedo demais a seguir ao hold longo de 'd') levava a
+            # confirmar a compra sem o foco lá ter chegado. Confirmado em
+            # produção (2026-08-21): duas tentativas seguidas, uma "desceu
+            # mas não comprou", outra "nem desceu" -- em ambas o código
+            # continuou às cegas como se tivesse resultado.
+            buy_focado = False
+            for tentativa_s in range(3):
+                pydirectinput.press('s')
+                print(f"\n[DEBUG] desceu <s> (tentativa {tentativa_s+1}/3)")
+                time.sleep(1.0)
+                if procurar_template(templates['buy_button_on'], "BUY BUTTON ON (focado)", MONITOR_MARKET, 0.80):
+                    buy_focado = True
+                    break
+
+            if not buy_focado:
+                abortar_com_erro("Botão BUY não ficou focado após 3 tentativas de 's' -- algo está muito errado.")
 
             ancora_journal = obter_tamanho_atual_log()
             pydirectinput.press('space')

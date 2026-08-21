@@ -513,16 +513,25 @@ def engatar_assistencia_menu():
         pydirectinput.press('1')
         time.sleep(1)
 
-        # 1. Espera a aba NAVIGATION aparecer -- só serve de gatilho de
-        # espera (não avança nada por si só); cicla com 'q' enquanto não
-        # aparecer.
+        # 1. Espera a aba NAVIGATION aparecer -- cicla com 'q' enquanto não
+        # aparecer. 10s na primeira tentativa; 5s nas seguintes (já é pelo
+        # menos a segunda vez a abrir o painel -- se ainda assim não
+        # aparecer, não é "precisa de mais tempo", é sinal de que algo está
+        # mesmo errado, e não compensa continuar às cegas até esgotar
+        # MAX_TENTATIVAS -- aborta logo aqui).
+        timeout_nav = 10.0 if tentativa == 1 else 5.0
         nav_found = False
-        for _ in range(6):
+        tempo_fim_nav = time.time() + timeout_nav
+        while time.time() < tempo_fim_nav:
             if procurar_template(templates['nav_tab'], "NAV TAB", MONITOR_PANEL, 0.61):
                 nav_found = True
                 break
             pydirectinput.press('q')
             time.sleep(0.5)
+
+        if not nav_found and tentativa >= 2:
+            abortar_com_erro(f"Aba NAVIGATION não apareceu mesmo depois de reabrir o painel "
+                              f"(tentativa {tentativa}, timeout {timeout_nav:.0f}s) -- algo está muito errado.")
 
         if nav_found:
             print(">>> Aba NAVIGATION confirmada -- a focar no destino pré-selecionado (Space)...")

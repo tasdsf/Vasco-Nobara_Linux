@@ -224,29 +224,48 @@ def aguardar_confirmacao_venda(posicao_ancora, timeout=30):
 # 3. LÓGICA DE VENDA COM WATCHDOGS
 # ==========================================
 
+def _aguardar_botoes_mercado(timeout):
+    tempo_fim = time.time() + timeout
+    while time.time() < tempo_fim:
+        if (procurar_template(templates['market_off'], "MARKET", MONITOR_MARKET) or
+                procurar_template(templates['market_on'], "MARKET", MONITOR_MARKET)):
+            return True
+        time.sleep(0.5)
+    return False
+
 def fase_1_abrir_mercado():
     print("\n>>> Abrindo Commodities Market no Carrier...")
     time.sleep(1.0)
-    pydirectinput.press('space') 
-    
-    # Watchdog 1: Esperar botões do mercado
-    timeout = time.time() + 15
-    while not (procurar_template(templates['market_off'], "MARKET", MONITOR_MARKET) or 
-               procurar_template(templates['market_on'], "MARKET", MONITOR_MARKET)):
-        if time.time() > timeout:
-            abortar_com_erro("Timeout (15s) à espera que os serviços do Carrier abram.")
-        time.sleep(0.5)
+    pydirectinput.press('space')
 
-    # Navegar até o botão de mercado
+    # Watchdog 1: Esperar botões do mercado (CARRIER SERVICES) -- mesma
+    # regra do NAVIGATION em engatar_assistencia_menu()
+    # (supercruise_assist.py): se não aparecer em 15s, fecha (4x
+    # backspace) e tenta abrir outra vez (space), com mais 7s; se mesmo
+    # assim não aparecer, algo está muito errado -- aborta em vez de
+    # continuar às cegas.
+    if not _aguardar_botoes_mercado(15):
+        print("[AVISO] Botões do mercado não detetados em 15s -- a fechar e a tentar outra vez...")
+        for _ in range(4):
+            pydirectinput.press('backspace')
+            time.sleep(0.3)
+        time.sleep(0.5)
+        pydirectinput.press('space')
+        if not _aguardar_botoes_mercado(7):
+            abortar_com_erro("Botões do mercado não apareceram mesmo depois de reabrir -- algo está muito errado.")
+
+    # Navegar até o botão de mercado -- intervalo subido de 0.3s para 0.6s
+    # (teclas andavam a falhar na ida ao mercado, possivelmente enviadas
+    # depressa demais para o jogo registar).
     for tecla in ['d', 'd']:
         print(f"A mover seleção: {tecla.upper()}")
         pydirectinput.press(tecla)
-        time.sleep(0.3)
+        time.sleep(0.6)
         if procurar_template(templates['market_on'], "MARKET ON", MONITOR_MARKET, 0.60):
             print("[LOG] Botão de Mercado focado!")
             pydirectinput.press('space')
             return True
-            
+
     abortar_com_erro("Botão 'Commodities Market' não detetado após varrimento mecânico.")
 
 def fase_2_vender_tudo():
