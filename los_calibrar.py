@@ -4,7 +4,7 @@ los_calibrar.py — Registo interativo de observações para o LOS Checker.
 Corre este script quando tiveres informação visual do jogo sobre o estado
 actual do carrier (oclusos ou visível). Grava na base de dados Postgres
 partilhada, associado ao sistema atual (detetado pelo journal) -- ver
-los_checker.py para detalhes de ligação (variável R2D2_DB_PASSWORD).
+los_checker.py para detalhes de ligação (autenticação via ~/.pgpass).
 """
 
 from infra_bridge import ED_LOG_DIR

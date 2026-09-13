@@ -46,9 +46,11 @@ este README é só a porta de entrada.
    ```bash
    cp .env.example .env
    ```
-   Variáveis: `R2D2_DB_PASSWORD` (obrigatória), `R2D2_DB_HOST`,
-   `R2D2_DB_PORT`, `R2D2_DB_NAME`, `R2D2_DB_USER` (opcionais, têm
-   defaults em `los_checker.py`). O `.env` nunca deve ser commitado.
+   Variáveis: `R2D2_DB_HOST`, `R2D2_DB_PORT`, `R2D2_DB_NAME`, `R2D2_DB_USER`
+   (opcionais, têm defaults em `los_checker.py`). A password não é lida do
+   `.env` nem do código -- vem do `~/.pgpass` (formato
+   `host:port:database:username:password`), resolvido automaticamente pelo
+   libpq. O `.env` nunca deve ser commitado.
 
 ## Uso
 

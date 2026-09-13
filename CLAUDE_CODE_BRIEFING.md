@@ -72,8 +72,8 @@ base `ED`, no mesmo servidor Postgres do projeto `tradingBot`), não num
 ficheiro local — evita misturar observações de sistemas diferentes e
 permite juntar dados de outras máquinas no futuro. Ligação via variáveis
 de ambiente (`.env`, nunca commitado): `R2D2_DB_HOST`, `R2D2_DB_PORT`,
-`R2D2_DB_NAME` (default `ED`), `R2D2_DB_USER`, `R2D2_DB_PASSWORD`
-(obrigatória). Registar observação: `python los_calibrar.py`. O antigo
+`R2D2_DB_NAME` (default `ED`), `R2D2_DB_USER`. Password vem do
+`~/.pgpass`, nunca do `.env` nem do código. Registar observação: `python los_calibrar.py`. O antigo
 `los_calibracao.json` foi descontinuado e removido.
 
 ## Ficheiros do projeto

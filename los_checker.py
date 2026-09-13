@@ -7,12 +7,13 @@ docker do tradingBot (tabela los_observacoes, coluna 'sistema'), em vez de um
 ficheiro local único — isto evita misturar observações de sistemas diferentes
 (ex: Fujin e Kamitra) como aconteceu antes com o los_calibracao.json.
 
-Ligação via variáveis de ambiente (nenhuma password fica no código):
+Ligação via variáveis de ambiente (nenhuma password fica no código nem em
+variável de ambiente -- a autenticação vem do ~/.pgpass, resolvido
+automaticamente pelo libpq por host:port:dbname:user):
     R2D2_DB_HOST     (default: localhost)
     R2D2_DB_PORT     (default: 5432)
     R2D2_DB_NAME     (default: ED)
     R2D2_DB_USER     (default: r2d2)
-    R2D2_DB_PASSWORD (obrigatória)
 
 Fluxo:
   1. Deteta o sistema atual pelo journal.
@@ -310,11 +311,13 @@ def _conectar_bd():
     port = os.environ.get("R2D2_DB_PORT", "5432")
     dbname = os.environ.get("R2D2_DB_NAME", "ED")
     user = os.environ.get("R2D2_DB_USER", "r2d2")
-    password = os.environ.get("R2D2_DB_PASSWORD")
-    if not password:
-        raise RuntimeError("Variável de ambiente R2D2_DB_PASSWORD não definida.")
+    # Sem password aqui -- vem do ~/.pgpass, resolvido automaticamente pelo
+    # libpq por host:port:dbname:user. Sem entrada correspondente no
+    # .pgpass, a ligação falha com erro de autenticação (comportamento
+    # esperado -- nunca deve haver fallback silencioso para uma password
+    # antiga).
     return psycopg2.connect(
-        host=host, port=port, dbname=dbname, user=user, password=password,
+        host=host, port=port, dbname=dbname, user=user,
         connect_timeout=5
     )
 
@@ -396,7 +399,7 @@ def _alertar_falha_bd(erro):
     print(f"[LOS] ALERTA: Falha ao ligar à base de dados Postgres.")
     print(f"[LOS] Detalhe: {erro}")
     print("[LOS] Verifica se o servidor Postgres (db_r2d2) está acessível")
-    print("[LOS] na rede local e se R2D2_DB_PASSWORD está definida.")
+    print("[LOS] na rede local e se o ~/.pgpass tem uma entrada válida para este host/user.")
     print("=" * 60 + "\n")
     if winsound:
         try:
