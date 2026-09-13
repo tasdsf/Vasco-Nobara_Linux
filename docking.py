@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_STATUS_FILE
 import time
 
 if sys.platform == "win32":
@@ -192,6 +192,26 @@ def navegar_para_aba(template_alvo, nome_alvo, tecla_ciclo, passos_desde_nav, te
 # ==========================================
 # 3. MOTOR DE LOGS COM CURSOR DINÂMICO
 # ==========================================
+STATUS_FLAGS = {
+    "DOCKED": 0x1,
+}
+
+def ler_telemetria_flags():
+    """ Lê Flags do Status.json do jogo -- mesmo mecanismo do
+    undocking.py/supercruise_assist.py. """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("Flags", 0)
+    except Exception:
+        return 0
+
+def ja_esta_atracada():
+    """ Confirma pela telemetria (Status.json, flag DOCKED=0x1) se a nave já
+    está pousada -- evita repetir o pedido de docking (que pode confundir o
+    menu ou o próprio jogo) quando já não há nada para pedir. """
+    return bool(ler_telemetria_flags() & STATUS_FLAGS["DOCKED"])
+
 def get_latest_log():
     list_of_files = glob.glob(os.path.join(LOG_DIR, 'Journal.*.log'))
     if not list_of_files: return None
@@ -347,6 +367,10 @@ def solicitar_docking():
 
 def executar():
     inicializar_infraestrutura()
+
+    if ja_esta_atracada():
+        print("[DOCKING] Telemetria (Status.json) reporta DOCKED -- nave já está pousada, a saltar pedido de docking.")
+        return
 
     print("Bot pronto. Inicia a aproximação em 1 segundos...")
     time.sleep(1)

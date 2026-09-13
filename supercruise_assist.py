@@ -680,6 +680,8 @@ def _alinhar_com_olho(nome_janela, limite_segundos=60.0):
 
     nave_ativa = olho.obter_modelo_nave_atual()
     MONITOR_CONFIG, CX_NEUTRO, CY_NEUTRO = olho.carregar_dados_calibracao(nave_ativa)
+    print(f"[INFO] Nave Actual: {nave_ativa}")
+    print(f"[INFO] Dados Calibracao: MONITOR_CONFIG: {MONITOR_CONFIG}\n    CX_NEUTRO: {CX_NEUTRO} CY_NEUTRO: {CY_NEUTRO}")
 
     def _gravar_snapshot_alinhado(sct, area_bussola, img_bussola=None, coords_bola=None):
         """ Grava exatamente o frame mostrado na janela de debug no instante

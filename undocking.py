@@ -284,6 +284,20 @@ def executar_auto_launch():
         precisa_reparar, score_reparar = False, 0.0
     sem_ammo, score_ammo = procurar_template(templates['no_ammo'], "NO_AMMO", MONITOR_MENU, 0.85)
 
+    # Passo 0d: Confirma que estamos mesmo no ecrã certo (a fila de ícones
+    # fuel/repair/ammo) antes de avançar às cegas com o 3x 'w' + space.
+    # noselection/noselection_carrier só ficam válidos DEPOIS da
+    # navegação (3x 'w') -- não servem aqui, ainda antes de qualquer
+    # tecla. A validação correta neste ponto é: NEED_REPAIR (chave-
+    # inglesa+gota em laranja, já detetado no Passo 0c) OU repair.png
+    # (chave-inglesa cinza/branca, estilo STARPORT SERVICES sem dano). Se
+    # nenhum dos dois bater, não há garantia nenhuma de estarmos no menu
+    # certo -- aborta em vez de mandar teclas para o ecrã errado.
+    if not precisa_reparar:
+        repair_normal_ok, score_nao_reparar = procurar_template(templates['repair'], "REPAIR (validação ecrã)", MONITOR_MENU, 0.80)
+        if not repair_normal_ok:
+            abortar_com_erro(f"Nem NEED-REPAIR nem repair.png detetados ({score_nao_reparar*100:.1f}%) ecrã errado, a rotina não deve prosseguir às cegas.")
+
     # Passo 1: Subida Mecânica + Abastecimento -- corre logo a seguir,
     # sem esperar pelo repair.png primeiro. repair.png é o ícone da
     # chave-inglesa no estilo branco/cinza contornado, que só bate bem
@@ -357,7 +371,7 @@ def executar_auto_launch():
             falar("Error. Interface stabilization timeout.")
             abortar_com_erro("Timeout (15s) à espera que o botão 'Repair' estabilize no menu da estação.")
 
-        m1, _ = procurar_template(templates['repair'], "ESTABILIZACAO", MONITOR_MENU, 0.85)
+        m1, _ = procurar_template(templates['repair'], "ESTABILIZACAO", MONITOR_MENU, 0.80)
         if m1: break
         time.sleep(0.3)
 
@@ -430,8 +444,11 @@ def aguardar_saida_estacao():
     print("\n>>> FASE: Detetar saída da estação...")
     print("[VISÃO] A monitorizar o HUD para a notificação 'AUTO LAUNCH COMPLETE'...")
 
-    # Watchdog de 3 Minutos (A estação pode ter fila de trânsito)
-    timeout_saida = time.time() + 180
+    # Watchdog de 9 Minutos (A estação pode ter fila de trânsito) -- mesmo
+    # teto que aguardar_confirmacao_docking() usa no docking.py (540s);
+    # 180s (3 min) era curto demais e dava timeout em falso com a nave
+    # ainda genuinamente em fila.
+    timeout_saida = time.time() + 540
     melhor_score = 0.0  # maior score visto nesta espera, mesmo que nunca cruze o threshold
 
     while True:
@@ -440,7 +457,7 @@ def aguardar_saida_estacao():
             # para sabermos se foi "quase" ou se o template nem chegou perto.
             _logger_calibracao.info(f"{melhor_score*100:.2f},{AUTO_COMPLETE_THRESHOLD*100:.0f},TIMEOUT")
             falar("Warning. Auto launch timeout exceeded.")
-            abortar_com_erro("Timeout (180s) à espera de sair da estação. A nave está presa no trânsito?")
+            abortar_com_erro("Timeout (540s) à espera de sair da estação. A nave está presa no trânsito?")
 
         encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, AUTO_COMPLETE_THRESHOLD)
         melhor_score = max(melhor_score, score)

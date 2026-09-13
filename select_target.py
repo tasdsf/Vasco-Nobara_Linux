@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_STATUS_FILE, print_ts as print
 import time
 
 # ==========================================
@@ -39,6 +39,32 @@ def abortar_com_erro(mensagem):
     _logger.error(mensagem)
     pydirectinput.press('backspace')
     sys.exit(1)
+
+def ler_destino_telemetria():
+    """ Lê o campo Destination do Status.json -- só existe (e só reflete o
+    nome certo) quando o jogo tem mesmo um destino de navegação trancado,
+    independente do que os templates de "LOCK/UNLOCK DESTINATION" leem no
+    ecrã. Fonte de verdade -- mesmo mecanismo do docking.py/ja_esta_atracada.
+    Motivo: "LOCK DESTINATION" vs "UNLOCK DESTINATION" partilham glifos e
+    cores ao ponto de a contaminação cruzada (~0.78-0.79 medida em produção,
+    2026-09-12) cair em cima do próprio LOCK_THRESHOLD -- qualquer variação
+    de compressão/anti-aliasing pode fazer o texto ERRADO passar no
+    threshold. Já mordeu 2x (2026-08-19 Zahir, 2026-09-12 Futen), da segunda
+    vez ao ponto de destrancar de verdade um alvo já correto numa reentrada.
+    """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return ((data.get("Destination") or {}).get("Name") or "").strip()
+    except Exception:
+        return ""
+
+def ja_trancado_em(nome_confirma):
+    """ nome_confirma vem em maiúsculas e por vezes embrulhado (ex: "CARRIER
+    (ZAHIR W6G-26N)") -- comparação por substring cobre esse caso e o
+    simples ("FUTEN SPACEPORT" == "FUTEN SPACEPORT"). """
+    destino = ler_destino_telemetria().upper()
+    return bool(destino) and destino in nome_confirma.upper()
 
 NOME_JANELA = "Ocular do Bot - Navegacao"
 VISUAL_DEBUG = False # Muda para False para esconder as janelas
@@ -361,33 +387,45 @@ def marcar_destino_dinamico():
                           f"candidatos com ícone parecido. Intervenção manual necessária.")
 
     # Verificação de Bloqueio (Lock) -- só chega aqui com o nome já confirmado
-    # certo. Depois de trancar (ramo "unlocked"), confirma que resultou
-    # mesmo em o alvo ficar trancado -- já aconteceu o 'space' não ter
-    # efeito e o alvo ficar por trancar sem nenhum erro aparente (ver
-    # comentário em templates_nomes). Duas formas possíveis do jogo
-    # confirmar isso: o cartão de detalhe fica aberto e o botão muda para
-    # "UNLOCK DESTINATION", OU o jogo fecha o cartão sozinho e volta à
-    # lista, mostrando o nome entre setas "< NOME >" -- bug real,
-    # confirmado em produção (2026-08-19 19:37): o Futen estava mesmo
-    # trancado (confirmado por Status.json e pela própria lista) mas só se
-    # verificava o cartão, e abortou 3x a achar que tinha falhado.
-    # Threshold 0.78 (não 0.82): os templates de botão foram recortados de
-    # área1.png/área2.png (resolução ligeiramente diferente da pipeline
-    # real MONITOR_PANEL) -- self-match real fica por volta de 0.80-1.0
-    # consoante a fonte, cross-contaminação confirmada a 0.615-0.73. 0.78 dá
-    # margem real dos dois lados.
+    # certo. A telemetria (Status.json -> Destination.Name) é consultada
+    # ANTES de decidir premir 'space': é a fonte de verdade, e evita depender
+    # dos templates "LOCK DESTINATION" / "UNLOCK DESTINATION", que partilham
+    # glifos/cores ao ponto de a contaminação cruzada (~0.78-0.79, medida em
+    # produção 2026-09-12) cair em cima do próprio LOCK_THRESHOLD. Sem este
+    # guard, uma reentrada (script já trancou, mas abortou por não conseguir
+    # CONFIRMAR visualmente) podia interpretar "já trancado" como "por
+    # trancar" e premir 'space' de novo -- destrancando de facto um alvo já
+    # correto. Bug real, confirmado em produção 2x (2026-08-19 Zahir,
+    # 2026-09-12 Futen).
     LOCK_THRESHOLD = 0.78
-    if procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, LOCK_THRESHOLD):
+    if ja_trancado_em(nome_confirma):
+        print(f"[LOG] Destino já trancado confirmado por telemetria (Status.json: '{ler_destino_telemetria()}').")
+        falar(f"{label_alvo} already locked.")
+    elif procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, LOCK_THRESHOLD):
         pydirectinput.press('space')
-        time.sleep(1.0)
 
-        confirmado_pos_lock = procurar_template(templates['locked'], "LOCKED (POS-LOCK, cartao)", MONITOR_PANEL, LOCK_THRESHOLD)
-        if not confirmado_pos_lock and template_confirma_lista is not None:
-            confirmado_pos_lock = procurar_template(template_confirma_lista, "LOCKED (POS-LOCK, lista)", MONITOR_PANEL, LOCK_THRESHOLD)
+        # Espera a telemetria refletir o lock (fonte de verdade) em vez de
+        # confiar num único frame de UI logo a seguir ao 'space' -- o cartão
+        # pode fechar-se sozinho e a decoração visual de confirmação atrasar-
+        # se (ver histórico acima). Até 3s, a cada 0.5s.
+        confirmado_pos_lock = False
+        for _tentativa in range(6):
+            time.sleep(0.5)
+            if ja_trancado_em(nome_confirma):
+                confirmado_pos_lock = True
+                break
 
         if not confirmado_pos_lock:
-            abortar_com_erro(f"O 'space' para trancar {nome_confirma} não teve efeito -- nem o cartão mostra "
-                              f"'UNLOCK DESTINATION' nem a lista mostra o nome entre setas. Intervenção manual necessária.")
+            # Fallback visual -- só chega aqui se a telemetria não confirmou
+            # em 3s (ex: campo Destination ainda não populado nesta versão
+            # do jogo para este tipo de alvo).
+            confirmado_pos_lock = procurar_template(templates['locked'], "LOCKED (POS-LOCK, cartao)", MONITOR_PANEL, LOCK_THRESHOLD)
+            if not confirmado_pos_lock and template_confirma_lista is not None:
+                confirmado_pos_lock = procurar_template(template_confirma_lista, "LOCKED (POS-LOCK, lista)", MONITOR_PANEL, LOCK_THRESHOLD)
+
+        if not confirmado_pos_lock:
+            abortar_com_erro(f"O 'space' para trancar {nome_confirma} não teve efeito -- nem a telemetria "
+                              f"(Status.json) nem o cartão nem a lista confirmam o lock. Intervenção manual necessária.")
         falar(f"{label_alvo} destination locked.")
     elif procurar_template(templates['locked'], "LOCKED", MONITOR_PANEL, LOCK_THRESHOLD):
         print("[LOG] Destino já estava trancado.")
