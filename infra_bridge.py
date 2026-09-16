@@ -18,6 +18,7 @@ Exports públicos:
     SCREEN_BACKEND  - string de diagnóstico do backend ativo
     KEYBOARD_BACKEND- string de diagnóstico do teclado
     notificar_erro_discord - envia um erro para o Discord (ver DISCORD_WEBHOOK_URL no .env)
+    notificar_discord - versão genérica (emoji configurável -- sucesso, aviso, etc.)
 """
 
 import os
@@ -81,8 +82,20 @@ class _YdotoolInput:
     @staticmethod
     def press(key: str):
         code = _to_scancode(key)
-        _subprocess.run(["ydotool", "key", f"{code}:1"], capture_output=True)
-        _subprocess.run(["ydotool", "key", f"{code}:0"], capture_output=True)
+        r_down = _subprocess.run(["ydotool", "key", f"{code}:1"], capture_output=True)
+        r_up = _subprocess.run(["ydotool", "key", f"{code}:0"], capture_output=True)
+        # Instrumentação (2026-09-15): até agora o returncode nunca era
+        # verificado -- uma falha do ydotool (daemon ocupado, socket
+        # contestado, timeout) era engolida em silêncio e o chamador seguia
+        # em frente como se a tecla tivesse sido enviada. Passo pequeno,
+        # só neste 'press' por agora: só visibilidade (log), sem mudar
+        # comportamento -- ver se isto apanha alguma das teclas "perdidas"
+        # suspeitas (2026-09-14: '1', 's', 'space' em scripts diferentes)
+        # antes de expandir para keyDown/keyUp/hotkey/typewrite.
+        if r_down.returncode != 0 or r_up.returncode != 0:
+            print_ts(f"[BRIDGE] AVISO: ydotool devolveu erro ao enviar '{key}' -- "
+                      f"down rc={r_down.returncode} stderr={r_down.stderr.decode(errors='replace').strip()!r} -- "
+                      f"up rc={r_up.returncode} stderr={r_up.stderr.decode(errors='replace').strip()!r}")
 
     @staticmethod
     def keyDown(key: str):
@@ -562,15 +575,15 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 # Windows deve definir VASCO_HOST_ID=vasco-r2d2-win).
 HOST_ID = os.environ.get("VASCO_HOST_ID", "vasco-r2d2-nobara")
 
-def notificar_erro_discord(origem, mensagem, imagem_path=None):
-    """ Envia uma notificação de erro para o Discord via webhook (URL em
+def notificar_discord(origem, mensagem, emoji="🔴", imagem_path=None):
+    """ Envia uma notificação para o Discord via webhook (URL em
     DISCORD_WEBHOOK_URL, ver .env). Best-effort -- nunca deve derrubar o
     chamador: qualquer falha (webhook não configurado, sem rede, timeout)
     fica só registada na consola, nunca levanta exceção.
 
-    origem       -- identifica o script/etapa que falhou (ex:
-                     "supercruise_assist.py").
-    mensagem     -- texto do erro.
+    origem       -- identifica o script/etapa (ex: "supercruise_assist.py").
+    mensagem     -- texto da notificação.
+    emoji        -- prefixo visual (🔴 erro por omissão; ✅ sucesso, etc.).
     imagem_path  -- caminho opcional de um PNG a anexar (ex: o screenshot
                      automático de abortar_com_erro em supercruise_assist.py);
                      se não existir, envia só o texto. """
@@ -579,7 +592,7 @@ def notificar_erro_discord(origem, mensagem, imagem_path=None):
         return False
     try:
         import requests
-        payload = {"content": f"🔴 **[{HOST_ID}] {origem}**\n{mensagem}"}
+        payload = {"content": f"{emoji} **[{HOST_ID}] {origem}**\n{mensagem}"}
         if imagem_path and os.path.exists(imagem_path):
             with open(imagem_path, "rb") as f:
                 resp = requests.post(
@@ -597,6 +610,10 @@ def notificar_erro_discord(origem, mensagem, imagem_path=None):
     except Exception as e:
         print(f"[DISCORD] Falha ao enviar notificação: {e}")
         return False
+
+def notificar_erro_discord(origem, mensagem, imagem_path=None):
+    """ Compatibilidade: notificação de erro (🔴). Ver notificar_discord(). """
+    return notificar_discord(origem, mensagem, emoji="🔴", imagem_path=imagem_path)
 
 # =====================================================================
 # 8. ESTADO PARTILHADO: "PERNA LIMPA" (para o auto-registo de LOS)

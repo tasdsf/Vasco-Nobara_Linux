@@ -212,6 +212,20 @@ def ja_esta_atracada():
     menu ou o próprio jogo) quando já não há nada para pedir. """
     return bool(ler_telemetria_flags() & STATUS_FLAGS["DOCKED"])
 
+GUI_FOCUS_NENHUM = 0
+
+def ler_gui_focus():
+    """ Lê GuiFocus do Status.json -- 0 quando nenhum painel está focado.
+    Mesmo mecanismo do select_target.py: distingue "o '1' não teve efeito,
+    painel nunca abriu" de "o painel abriu, só não está no sítio certo".
+    """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("GuiFocus", GUI_FOCUS_NENHUM)
+    except Exception:
+        return GUI_FOCUS_NENHUM
+
 def get_latest_log():
     list_of_files = glob.glob(os.path.join(LOG_DIR, 'Journal.*.log'))
     if not list_of_files: return None
@@ -224,6 +238,47 @@ def obter_tamanho_atual_log():
         return os.path.getsize(latest_log)
     except:
         return 0
+
+EVENTOS_RESOLUCAO_DOCKING = {'Docked', 'DockingCancelled', 'DockingDenied', 'Undocked'}
+
+def pedido_docking_em_curso():
+    """ Varre o journal à procura de um pedido de docking já concedido
+    (DockingGranted) e ainda sem resposta (nenhum Docked/DockingCancelled/
+    DockingDenied/Undocked depois dele) -- sinal de que o Docking Computer
+    pode já estar a voar a nave para o pad.
+
+    Reabrir o painel lateral e voltar a selecionar a estação nesse estado
+    cancela o pedido em curso -- bug real, confirmado em produção
+    (2026-09-15): uma reentrada de solicitar_docking() (depois de uma
+    chamada anterior falhar por outro motivo) reabriu o painel a meio de
+    uma aproximação já concedida e a voar (música "DockingComputer"
+    tocando havia 23s); 52s depois, DockingCancelled -> DockingDenied
+    (Offences, por já estar marcada como trespass) -> a estação abriu fogo
+    e destruiu a nave. Este guard corre ANTES de qualquer input em
+    solicitar_docking() -- se um pedido já estiver em curso, salta direto
+    para monitorizar (aguardar_confirmacao_docking), sem tocar em mais
+    nada. """
+    latest_log = get_latest_log()
+    if not latest_log:
+        return False
+    try:
+        with open(latest_log, 'r', encoding='utf-8') as f:
+            linhas = f.readlines()
+    except Exception:
+        return False
+
+    em_curso = False
+    for linha in linhas:
+        try:
+            evento = json.loads(linha)
+        except Exception:
+            continue
+        nome = evento.get('event')
+        if nome == 'DockingGranted':
+            em_curso = True
+        elif nome in EVENTOS_RESOLUCAO_DOCKING:
+            em_curso = False
+    return em_curso
 
 def ler_novos_eventos(posicao_ancora):
     latest_log = get_latest_log()
@@ -264,9 +319,24 @@ def aguardar_confirmacao_docking(posicao_ancora, timeout=540):
             if nome_evento == 'Docked':
                 print(f"[OK] Pouso confirmado via Log: Concluído em {evento.get('StationName', 'Estação')}")
                 return True
-            elif nome_evento == 'DockingCancelled' or nome_evento == 'DockingDenied':
-                print(f"[ALERTA] A permissão de atracagem foi revogada ou negada pelo jogo.")
-                
+            elif nome_evento == 'DockingCancelled':
+                print(f"[ALERTA] A permissão de atracagem foi cancelada pelo jogo.")
+                return False
+            elif nome_evento == 'DockingDenied':
+                motivo = evento.get('Reason', '?')
+                if motivo == 'Distance':
+                    # Recuperável -- a nave ainda não chegou perto o
+                    # suficiente quando o pedido foi enviado (docking.py não
+                    # tem verificação de distância própria, confia na
+                    # aproximação já feita pelo OLHO/supercruise assist).
+                    # Confirmado em produção (2026-09-14): 5x negado por
+                    # "Distance" no Futen Spaceport em poucos minutos, cada
+                    # reentrada a pedir cedo demais outra vez. Não abortar --
+                    # sinaliza ao chamador (solicitar_docking) para esperar a
+                    # nave aproximar-se mais e voltar a pedir.
+                    print(f"[AVISO] Pedido negado por distância -- a nave ainda não está perto o suficiente.")
+                    return 'distance'
+                print(f"[ALERTA] A permissão de atracagem foi negada pelo jogo (motivo: {motivo}).")
                 return False
 
         template = templates.get('repair')
@@ -284,6 +354,20 @@ def aguardar_confirmacao_docking(posicao_ancora, timeout=540):
 # 5. ROTINA CRÍTICA DE EXECUÇÃO
 # ==========================================
 def solicitar_docking():
+    # Guard crítico -- ver pedido_docking_em_curso(). Corre antes de
+    # qualquer input: se já houver um pedido concedido sem resposta ainda,
+    # não mexe em nada, só monitoriza.
+    if pedido_docking_em_curso():
+        print("[DOCKING] Pedido já concedido e sem resposta ainda (journal) -- "
+              "a saltar o painel, só a monitorizar o pouso.")
+        ancora_log = obter_tamanho_atual_log()
+        resultado = aguardar_confirmacao_docking(ancora_log)
+        if resultado is True:
+            print("\n[SUCESSO] Operação de docking totalmente finalizada.")
+            return True
+        abortar_com_erro("Pedido de docking já em curso não terminou em pouso "
+                          "(negado, cancelado ou timeout). Intervenção manual necessária.")
+
     print("\n[VÔO] Parando nave (X)...")
     pydirectinput.press('x')
     time.sleep(0.5)
@@ -298,7 +382,22 @@ def solicitar_docking():
         print(f"\n>>> [TENTATIVA {tentativa}/3] Abrindo painel lateral (1)...")
         pydirectinput.press('1')
         time.sleep(1.2)
-        
+
+        # Se o GuiFocus continuar em 0, o '1' não chegou ao jogo --
+        # provavelmente o foco da janela saiu para outro sítio (ex: um
+        # editor de texto aberto por cima). Reforça o foco e repete o '1'
+        # antes de continuar -- sem isto, o script fica preso ativamente
+        # (screenshots continuam a correr, nada avança) até esgotar
+        # watchdogs bem mais longos, ou nem isso. Confirmado em produção
+        # (2026-09-15): mais de 7 minutos preso assim, sem nenhum
+        # DockingRequested no journal.
+        if ler_gui_focus() == GUI_FOCUS_NENHUM:
+            print("[AVISO] GuiFocus continua em 0 (nenhum painel aberto) -- a reforçar foco e repetir o '1'.")
+            focar_jogo_seguro()
+            time.sleep(0.3)
+            pydirectinput.press('1')
+            time.sleep(1.2)
+
         # 2 passos de 'e' a partir de NAVIGATION chega sempre a CONTACTS
         # (layout fixo do painel: NAVIGATION / TRANSACTIONS / CONTACTS) --
         # ver navegar_para_aba().
@@ -349,9 +448,19 @@ def solicitar_docking():
             # journal (Granted/Denied/Cancelled/Docked) até ao fim, em vez de
             # reiniciar a tentativa ao fim de uma janela curta de espera.
             print("[LOG] Pedido enviado. A monitorizar o journal até ao pouso (sem mais inputs)...")
-            if aguardar_confirmacao_docking(ancora_log):
+            resultado = aguardar_confirmacao_docking(ancora_log)
+            if resultado is True:
                 print("\n[SUCESSO] Operação de docking totalmente finalizada.")
                 return True
+            elif resultado == 'distance':
+                # Negação recuperável -- a nave só precisa de se aproximar
+                # mais. O painel já está fechado (backspace acima); espera e
+                # deixa o ciclo 'for tentativa' reabrir o painel e re-pedir,
+                # em vez de abortar como as outras negações.
+                print(f"[LOG] A aguardar a nave aproximar-se mais antes de re-pedir "
+                      f"(tentativa {tentativa}/3)...")
+                time.sleep(20)
+                continue
             else:
                 abortar_com_erro("Pedido de docking enviado mas não confirmado (negado, cancelado ou "
                                   "timeout à espera do pouso). Intervenção manual necessária.")

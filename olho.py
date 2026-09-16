@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import time
 import logging
 import cv2
@@ -395,6 +396,76 @@ def localizar_alvo_hud(sct):
 # de insistir para sempre com o mesmo impulso fraco que não tem efeito.
 _escalada_bussola = {"comando": None, "px": None, "py": None, "sem_progresso": 0}
 
+BANDA_PRE_ROLL_MIN = 45
+BANDA_PRE_ROLL_MAX = 135
+
+def calcular_angulo_bola(dx, dy):
+    """ Ângulo da bola em relação ao centro, convenção matemática (0°=
+    direita, 90°=cima, sentido anti-horário a aumentar) -- dy da imagem
+    tem de ser invertido porque cresce para baixo. """
+    return math.degrees(math.atan2(-dy, dx)) % 360
+
+def _distancia_a_banda(angulo):
+    """ 0.0 se o ângulo já estiver dentro de [BANDA_PRE_ROLL_MIN,
+    BANDA_PRE_ROLL_MAX]; caso contrário, a distância COM SINAL (-180..180)
+    até à margem mais próxima da banda -- o sinal indica de que lado o
+    ângulo está. """
+    if BANDA_PRE_ROLL_MIN <= angulo <= BANDA_PRE_ROLL_MAX:
+        return 0.0
+    d_min = (angulo - BANDA_PRE_ROLL_MIN + 180) % 360 - 180
+    d_max = (angulo - BANDA_PRE_ROLL_MAX + 180) % 360 - 180
+    return d_min if abs(d_min) < abs(d_max) else d_max
+
+# Estado do pré-roll: qual direção ('q'/'e') se está a tentar, e a última
+# distância à banda vista -- usado para autocorrigir se a direção escolhida
+# estiver a afastar o alvo da banda em vez de o aproximar (ver
+# aplicar_pre_roll -- a correspondência entre q/e e o sentido de rotação
+# da bola no ecrã não está confirmada ao vivo, por isso a autocorreção é
+# o que torna isto seguro independentemente de qual acerta à primeira).
+_estado_pre_roll = {"direcao": None, "distancia_anterior": None}
+
+def aplicar_pre_roll(coords_bola, cx, cy):
+    """ Antes do alinhamento normal (w/a/s/d), roda a nave (q=esquerda,
+    e=direita) até o alvo ficar entre os 45º e os 135º -- zona de "cima",
+    onde a correção seguinte pode depender mais do pitch (w/s), o eixo
+    mais forte deste esquema de controlo (ver FATOR_AD: yaw precisa do
+    dobro do tempo de impulso para o mesmo efeito). Devolve True se
+    aplicou um impulso de roll (o chamador não deve fazer mais nada nesse
+    ciclo); False se o alvo já está dentro da banda (segue para o
+    alinhamento normal). """
+    global _estado_pre_roll
+
+    dx = coords_bola[0] - cx
+    dy = coords_bola[1] - cy
+    angulo = calcular_angulo_bola(dx, dy)
+    dist = _distancia_a_banda(angulo)
+
+    if dist == 0.0:
+        _estado_pre_roll = {"direcao": None, "distancia_anterior": None}
+        return False
+
+    direcao = _estado_pre_roll["direcao"]
+    if direcao is None:
+        # Primeira tentativa nesta ocorrência -- chute inicial a partir do
+        # sinal da distância; corrigido já no próximo ciclo se estiver
+        # errado (ver abaixo).
+        direcao = 'e' if dist > 0 else 'q'
+    elif (_estado_pre_roll["distancia_anterior"] is not None
+          and abs(dist) >= abs(_estado_pre_roll["distancia_anterior"])):
+        direcao = 'q' if direcao == 'e' else 'e'
+        print(f"[AVISO] Pré-roll não aproximou da banda ({_estado_pre_roll['distancia_anterior']:.1f}° -> "
+              f"{dist:.1f}°) -- a inverter direção para '{direcao}'.")
+
+    print(f"[INFO] PRE-ROLL: ângulo={angulo:.1f}° (banda {BANDA_PRE_ROLL_MIN}-{BANDA_PRE_ROLL_MAX}°) "
+          f"dist={dist:.1f}° -> '{direcao}'")
+    pydirectinput.keyDown(direcao)
+    time.sleep(IMPULSO_BUSSOLA)
+    pydirectinput.keyUp(direcao)
+    time.sleep(1.0)
+
+    _estado_pre_roll = {"direcao": direcao, "distancia_anterior": dist}
+    return True
+
 def aplicar_manobra_bussola(comando, dist_x, dist_y, coords_bola=None):
     global _escalada_bussola
 
@@ -632,8 +703,20 @@ def executar():
                         aplicar_roll_desocluir(f"ALINHADO_MACRO mas HUD nao confirma reticulo (bola a dx={dist_x} dy={dist_y} do centro) -- possivel oclusao do reticulo")
                     else:
                         tempo_cego = None
-                        comando_display = f"MACRO: {cmd_bussola}"
-                        aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y, coords_bola)
+                        # Pré-roll: só faz sentido com uma direção real já
+                        # calculada (não em AQUECENDO, os 3 primeiros
+                        # frames sem histórico ainda) nem no caso OCA (alvo
+                        # atrás -- o impulso grande e fixo já trata disso,
+                        # e o ângulo junto ao centro nesse caso é uma
+                        # singularidade sem direção fiável).
+                        if cmd_bussola == "AQUECENDO" or cmd_bussola.startswith("OCA:"):
+                            comando_display = f"MACRO: {cmd_bussola}"
+                            aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y, coords_bola)
+                        elif aplicar_pre_roll(coords_bola, CX_NEUTRO, CY_NEUTRO):
+                            comando_display = "MACRO: PRE-ROLL (a posicionar alvo entre 45º-135º)"
+                        else:
+                            comando_display = f"MACRO: {cmd_bussola}"
+                            aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y, coords_bola)
 
                 if VISUAL_DEBUG:
                     img_hud_bussola = img_bussola.copy()

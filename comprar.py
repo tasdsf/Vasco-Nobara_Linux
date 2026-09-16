@@ -6,7 +6,7 @@ import json
 import logging
 import cv2
 import numpy as np
-from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR, ED_STATUS_FILE
 import time
 
 if sys.platform == "win32":
@@ -143,6 +143,37 @@ except Exception as e:
 # disponível para compra de cada vez.
 TIPOS_RARE_ACEITES = {"fujintea", "kamitracigars"}
 
+def obter_cargo_atual():
+    """ Lê o snapshot atual do porão (Cargo.json, escrito pelo próprio jogo
+    sempre que o porão muda) -- mesmo mecanismo do vender.py. Serve para
+    saltar a compra por completo quando já há rares por vender: regra do
+    próprio jogo (documentada em vender.py) é que a estação só volta a
+    oferecer rares para compra depois de esvaziado o que já se tem --
+    tentar comprar enquanto o porão não está vazio é sempre "esgotado",
+    fica preso no ciclo de 20 min à espera de um restock que nunca chega
+    enquanto a carga antiga não for vendida. Confirmado em produção
+    (2026-09-15). """
+    caminho = os.path.join(ED_LOG_DIR, 'Cargo.json')
+    try:
+        with open(caminho, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('Count', 0)
+    except Exception:
+        return None  # desconhecido -- não bloquear o fluxo por causa disto
+
+def ler_gui_focus():
+    """ Lê GuiFocus do Status.json -- 0 quando nenhum painel está focado.
+    Mesmo mecanismo do docking.py/select_target.py/vender.py -- ajuda a
+    diagnosticar se uma navegação perdida (ex: aterrar no Universal
+    Cartographics em vez do Commodities Market) foi por o jogo estar noutro
+    painel qualquer, ou sem nenhum focado de todo. """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("GuiFocus", 0)
+    except Exception:
+        return 0
+
 def get_latest_log():
     list_of_files = glob.glob(os.path.join(ED_LOG_DIR, 'Journal.*.log'))
     if not list_of_files: return None
@@ -276,7 +307,8 @@ def fase_1_entrar_servicos():
     if _tentar_focar_servicos(5.0):
         return True
 
-    abortar_com_erro("Botão 'Starport/Carrier Services' não detetado mesmo depois de reabrir -- algo está muito errado.")
+    abortar_com_erro(f"Botão 'Starport/Carrier Services' não detetado mesmo depois de reabrir -- algo está "
+                      f"muito errado (GuiFocus={ler_gui_focus()}, ver logs/comprar_test.png).")
 
 def fase_2_abrir_mercado():
     print("\n>>> FASE 2: Abrindo Mercado...")
@@ -298,7 +330,8 @@ def fase_2_abrir_mercado():
         pydirectinput.press(tecla)
         time.sleep(2.6)
         
-    abortar_com_erro("Botão 'Commodities Market' não detetado na lista após varrimento mecânico.")
+    abortar_com_erro(f"Botão 'Commodities Market' não detetado na lista após varrimento mecânico "
+                      f"(GuiFocus={ler_gui_focus()}, ver logs/comprar_test.png para a última captura).")
     pydirectinput.press('backspace')
 
 def fase_3_comprar_item():
@@ -456,6 +489,14 @@ def executar_ciclo_completo():
 
 def executar():
     inicializar_infraestrutura()
+
+    cargo_atual = obter_cargo_atual()
+    if cargo_atual:
+        msg = (f"Porão já tem {cargo_atual} unidades por vender -- a saltar a compra "
+               f"(a estação não oferece mais rares até esvaziar o que já se tem).")
+        print(f"[COMPRAR] {msg}")
+        _logger.info(msg)
+        return
 
     print("O R2D2 assume os comandos em 1 segundos...")
     time.sleep(1)

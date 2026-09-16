@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR, ED_STATUS_FILE, notificar_discord
 import time
 
 # ==========================================
@@ -16,12 +16,21 @@ import time
 diretorio_atual = os.path.dirname(os.path.abspath(__file__))
 pasta_logs = os.path.join(diretorio_atual, "logs")
 os.makedirs(pasta_logs, exist_ok=True)
+# Última captura de procurar_template(), sobrescrita a cada chamada -- dá
+# evidência forense de qualquer falha sem depender de VISUAL_DEBUG (mesmo
+# padrão do docking.py/select_target.py/undocking.py). Em falta até agora
+# neste ficheiro -- sem isto não havia como ver o que estava mesmo no ecrã
+# nos incidentes de "Commodities Market não detetado".
+log_test = os.path.join(pasta_logs, "vender_test.png")
 
 # Logger proprio (nao usa logging.basicConfig -- com varios scripts no mesmo
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
 # com o prefixo errado no log partilhado).
 _logger = logging.getLogger("vender")
-_logger.setLevel(logging.ERROR)
+# INFO (não ERROR) -- senão o _logger.info() da venda com sucesso, mais
+# abaixo, fica silenciosamente descartado pelo próprio logging e nunca
+# chega ao ficheiro (mesmo nível que o comprar.py já usa).
+_logger.setLevel(logging.INFO)
 if not _logger.handlers:
     _fh = logging.FileHandler(os.path.join(pasta_logs, "r2d2_combined.log"), encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(asctime)s - [VENDER] - %(levelname)s - %(message)s'))
@@ -98,6 +107,16 @@ templates_nomes = {
     'rare_not_on1': 'RARE_NOT_SELECTED1.png',
     'exit_on': 'EXIT_SELECTED.png',
     'sell_confirm_fujin': 'RARE_2_SELL_CONFIRM.png',
+    # Reaproveitado do comprar.py -- mesma UI de mercado.
+    'buy_on': 'BUY_SELECTED.png',
+    # Cabeçalho do painel de conteúdo -- não é só o botão da aba ficar
+    # destacado (isso confirmou-se NÃO bastar: capturado ao vivo em
+    # 2026-09-16, o botão SELL ficava laranja com o conteúdo ainda em
+    # "BUY FROM MARKET" por trás, só mudando depois do 'space'). Este
+    # template é o texto do cabeçalho real, "SELL TO MARKET" -- confirma o
+    # CONTEÚDO trocou, não só o botão. Auto-teste: 1.0 no ecrã SELL, 0.66
+    # no ecrã BUY -- boa margem.
+    'sell_header': 'SELL_TO_MARKET_HEADER.png',
 }
 
 templates = {}
@@ -125,6 +144,7 @@ def procurar_template(template, nome_label, monitor, threshold=0.80, log_trace=F
     with mss.mss() as sct:
         img_bgra = np.array(sct.grab(monitor))
         img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(log_test, img_bgr)
         resultado = cv2.matchTemplate(img_bgr, template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
         encontrou = max_val >= threshold
@@ -166,6 +186,18 @@ def obter_tamanho_atual_log():
     if not latest_log: return 0
     try:
         return os.path.getsize(latest_log)
+    except Exception:
+        return 0
+
+def ler_gui_focus():
+    """ Lê GuiFocus do Status.json -- 0 quando nenhum painel está focado.
+    Mesmo mecanismo do docking.py/select_target.py -- serve para
+    diagnosticar se um 'd'/'space' sem efeito é por o jogo não ter foco
+    nenhum de todo (GuiFocus=0) ou por estar noutro painel qualquer. """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("GuiFocus", 0)
     except Exception:
         return 0
 
@@ -213,8 +245,11 @@ def aguardar_confirmacao_venda(posicao_ancora, timeout=30):
     while time.time() < limite:
         for evento in ler_novos_eventos(posicao_ancora):
             if evento.get('event') == 'MarketSell' and evento.get('Type', '').lower() in TIPOS_RARE_ACEITES:
-                print(f"[OK] Venda confirmada pelo journal: {evento.get('Type_Localised')} "
-                      f"x{evento.get('Count')} por {evento.get('TotalSale')} CR")
+                msg = (f"Venda confirmada pelo journal: {evento.get('Type_Localised')} "
+                       f"x{evento.get('Count')} por {evento.get('TotalSale')} CR")
+                print(f"[OK] {msg}")
+                _logger.info(msg)
+                notificar_discord("vender.py", msg, emoji="✅")
                 return True
         time.sleep(0.5)
     print("[AVISO] Venda não confirmada pelo journal dentro do tempo limite.")
@@ -256,27 +291,49 @@ def fase_1_abrir_mercado():
 
     # Navegar até o botão de mercado -- intervalo subido de 0.3s para 0.6s
     # (teclas andavam a falhar na ida ao mercado, possivelmente enviadas
-    # depressa demais para o jogo registar).
+    # depressa demais para o jogo registar), e agora para 1.0s (2026-09-16):
+    # a falha continuou mesmo a 0.6s, e a instrumentação do ydotool
+    # (infra_bridge.press) nunca acusou falha de entrega -- resta timing/
+    # renderização, não perda de tecla no SO.
     for tecla in ['d', 'd']:
         print(f"A mover seleção: {tecla.upper()}")
         pydirectinput.press(tecla)
-        time.sleep(0.6)
+        time.sleep(1.0)
         if procurar_template(templates['market_on'], "MARKET ON", MONITOR_MARKET, 0.60):
             print("[LOG] Botão de Mercado focado!")
             pydirectinput.press('space')
             return True
 
-    abortar_com_erro("Botão 'Commodities Market' não detetado após varrimento mecânico.")
+    abortar_com_erro(f"Botão 'Commodities Market' não detetado após varrimento mecânico "
+                      f"(GuiFocus={ler_gui_focus()}, ver logs/vender_test.png para a última captura).")
 
 def fase_2_vender_tudo():
     print("\n>>> Iniciando varrimento de inventário (Aba SELL)...")
     time.sleep(2.5)
-    
-    pydirectinput.press('s') # Muda para aba SELL
-    time.sleep(0.5)
-    pydirectinput.press('space') # Seleciona aba SELL
-    time.sleep(1.2)
-    
+
+    # Mudar para a aba SELL e CONFIRMAR que o conteúdo trocou de verdade --
+    # não basta o botão SELL ficar destacado (confirmado ao vivo,
+    # 2026-09-16: o botão fica laranja de imediato, mas o painel de
+    # conteúdo pode continuar em "BUY FROM MARKET" mais um instante, até o
+    # 'space' assentar). Sem esta verificação, o resto desta função scava a
+    # lista errada (BUY) à procura de Fujin Tea para VENDER -- nunca
+    # encontra, chega ao fim da lista, e o utilizador via isso como "entrou
+    # no comprar por engano". Até 3 tentativas de s+space antes de desistir.
+    aba_sell_confirmada = False
+    for _tentativa_sell in range(3):
+        pydirectinput.press('s')  # Muda para aba SELL
+        time.sleep(0.5)
+        pydirectinput.press('space')  # Seleciona aba SELL
+        time.sleep(1.2)
+        if procurar_template(templates['sell_header'], "SELL TO MARKET (cabecalho)", MONITOR_MARKET, 0.85, log_trace=True):
+            aba_sell_confirmada = True
+            break
+        print(f"[AVISO] Cabeçalho 'SELL TO MARKET' não confirmado (tentativa {_tentativa_sell + 1}/3) -- a tentar de novo...")
+
+    if not aba_sell_confirmada:
+        abortar_com_erro("Não foi possível confirmar a aba SELL (cabeçalho 'SELL TO MARKET' nunca apareceu "
+                          "após 3 tentativas) -- pode ter ficado na aba BUY. Intervenção manual necessária.")
+
     item_visivel = (procurar_template(templates['rare_not_on'], "FUJIN TEA (INV)", MONITOR_MARKET, 0.85, log_trace=True) or
                     procurar_template(templates['rare_not_on1'], "FUJIN TEA (INV) ALT", MONITOR_MARKET, 0.85, log_trace=True))
 
@@ -394,7 +451,21 @@ def executar():
         if fase_1_abrir_mercado():
             resultado = fase_2_vender_tudo()
             if resultado in ("VENDIDO", "VAZIO"):
-                return
+                # Não sai daqui com stock por vender -- o comprar.py, no
+                # próximo ciclo, salta a compra enquanto o porão não
+                # estiver vazio (regra do jogo: só oferece mais rares
+                # depois de esvaziado o que já se tem). Cruzar com o
+                # Cargo.json real antes de devolver sucesso, em vez de
+                # confiar só no resultado da fase_2 -- confirmado em
+                # produção (2026-09-15).
+                cargo_restante = obter_cargo_atual()
+                if not cargo_restante:
+                    return
+                print(f"[AVISO] fase_2_vender_tudo devolveu '{resultado}' mas o porão "
+                      f"(Cargo.json) ainda tem {cargo_restante} unidades -- não sai daqui "
+                      f"com stock por vender (tentativa {tentativa + 1}/3). A tentar de novo...")
+                time.sleep(2.0)
+                continue
 
             print(f"[AVISO] Venda não confirmada pelo journal (tentativa {tentativa + 1}/3). "
                   f"A voltar ao menu da nave e tentar de novo...")

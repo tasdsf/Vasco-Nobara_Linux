@@ -59,6 +59,21 @@ def ler_destino_telemetria():
     except Exception:
         return ""
 
+GUI_FOCUS_NENHUM = 0
+
+def ler_gui_focus():
+    """ Lê GuiFocus do Status.json -- 0 quando nenhum painel está focado.
+    Serve para distinguir, durante o watchdog da aba NAVIGATION, "o '1' não
+    teve efeito, painel nunca abriu" de "o painel abriu, só não está na aba
+    certa" -- casos que precisam de recuperação diferente (repetir o '1'
+    vs. ciclar 'q'). """
+    try:
+        with open(ED_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("GuiFocus", GUI_FOCUS_NENHUM)
+    except Exception:
+        return GUI_FOCUS_NENHUM
+
 def ja_trancado_em(nome_confirma):
     """ nome_confirma vem em maiúsculas e por vezes embrulhado (ex: "CARRIER
     (ZAHIR W6G-26N)") -- comparação por substring cobre esse caso e o
@@ -328,13 +343,28 @@ def marcar_destino_dinamico():
     # Às vezes uma luz (sol/estação) bate exatamente em cima da aba e oclui
     # a deteção momentaneamente -- watchdog continuo de 6 minutos em vez de
     # desistir cedo, para dar tempo a luz mudar de posição.
+    #
+    # Mas ciclar 'q' só ajuda se o painel JÁ estiver aberto (só na aba
+    # errada) -- se o '1' de cima não tiver tido efeito (tecla perdida), o
+    # painel nunca abre e nenhum 'q' resolve nada. Confirmado em produção
+    # (2026-09-14): watchdog inteiro de 6 minutos esgotado a ciclar 'q' sem
+    # nunca ter aberto painel nenhum. GuiFocus (Status.json) desfaz esta
+    # ambiguidade: 0 = nenhum painel focado -- repete o '1' em vez de
+    # continuar a ciclar às cegas.
     nav_found = False
     timeout_nav = time.time() + 360  # 6 minutos
+    proximo_reforco_1 = time.time() + 5.0
     while time.time() < timeout_nav:
         # Threshold NAV TAB medido ao vivo em jogo: match=0.8409 -> 0.80 com margem de segurança
         if procurar_template(templates['nav_tab'], "NAV TAB", MONITOR_PANEL, 0.61):
             nav_found = True
             break
+        if time.time() >= proximo_reforco_1 and ler_gui_focus() == GUI_FOCUS_NENHUM:
+            print("[AVISO] GuiFocus continua em 0 (nenhum painel aberto) -- a repetir o '1'.")
+            pydirectinput.press('1')
+            time.sleep(1.2)
+            proximo_reforco_1 = time.time() + 5.0
+            continue
         pydirectinput.press('q'); time.sleep(0.5)
 
     if not nav_found:

@@ -541,10 +541,36 @@ def engatar_assistencia_menu():
             # 2. Valida que o painel mostra mesmo o alvo certo (Zahir ou a
             # estação) antes de tentar ativar a assistência -- sem isto, um
             # 'e'+'space' às cegas podia ativar o botão errado.
-            alvo_confirmado = (
-                procurar_template(templates['confirma_carrier'], "CONFIRMA CARRIER", MONITOR_PANEL, 0.80) or
-                procurar_template(templates['confirma_station'], "CONFIRMA STATION", MONITOR_PANEL, 0.80)
-            )
+            #
+            # A lista da NAVIGATION está ordenada por distância, que muda
+            # continuamente -- entre o select_target.py trancar o alvo e
+            # este passo (já depois do undock, nave em movimento), a lista
+            # pode ter reordenado. Se o cursor segue posição em vez de
+            # identidade, o 'space' acima abre o cartão de uma linha vizinha,
+            # não o alvo. Em vez de desistir logo desta tentativa (que reabre
+            # tudo e pode cair no mesmo sítio errado), tenta recuar algumas
+            # linhas com 'w' e reconfirmar -- muito mais barato. Bug real,
+            # confirmado em produção (2026-09-13): a linha destacada ao abrir
+            # o painel já não era a certa, 2x em 3h. Direção 'w' (recuar) e
+            # não 's' (avançar): o padrão observado é o cursor vir ADIANTADO
+            # em relação ao alvo certo (ver suspeita de 's' a mais registada
+            # em ler_destino_telemetria/ja_trancado_em -- select_target.py --
+            # a investigar).
+            MAX_DESLOCAMENTO_LISTA = 5
+            alvo_confirmado = False
+            for deslocamento in range(MAX_DESLOCAMENTO_LISTA + 1):
+                alvo_confirmado = (
+                    procurar_template(templates['confirma_carrier'], "CONFIRMA CARRIER", MONITOR_PANEL, 0.80) or
+                    procurar_template(templates['confirma_station'], "CONFIRMA STATION", MONITOR_PANEL, 0.80)
+                )
+                if alvo_confirmado:
+                    if deslocamento > 0:
+                        print(f"[LOG] Alvo certo encontrado {deslocamento} linha(s) atrás do cursor pré-selecionado (lista reordenou).")
+                    break
+                if deslocamento < MAX_DESLOCAMENTO_LISTA:
+                    pydirectinput.press('backspace'); time.sleep(0.4)  # fecha cartão errado, volta à lista
+                    pydirectinput.press('w'); time.sleep(0.4)  # recua uma linha
+                    pydirectinput.press('space'); time.sleep(0.8)  # reabre o cartão
 
             if alvo_confirmado:
                 print(">>> Alvo confirmado -- a ativar Assistência (D + Space)...")
