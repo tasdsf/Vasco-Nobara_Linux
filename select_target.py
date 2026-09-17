@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, ED_STATUS_FILE, print_ts as print
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_STATUS_FILE, capturar_screenshot_erro, print_ts as print
 import time
 
 # ==========================================
@@ -37,6 +37,7 @@ def abortar_com_erro(mensagem):
     """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
     print(f"\n[FATAL] {mensagem}")
     _logger.error(mensagem)
+    capturar_screenshot_erro(pasta_logs)
     pydirectinput.press('backspace')
     sys.exit(1)
 
@@ -318,8 +319,14 @@ def procurar_template(template, nome_label, monitor, threshold=0.80):
 # ==========================================
 # 4. LÓGICA DE MARCAÇÃO INTELIGENTE
 # ==========================================
-def marcar_destino_dinamico():
-    tipo_alvo = obter_alvo_contextual_log()
+def marcar_destino_dinamico(tipo_alvo_forcado=None):
+    """ tipo_alvo_forcado ("station"/"carrier") salta a deteção automática
+    por contexto do journal (obter_alvo_contextual_log) e usa este valor
+    diretamente -- usado pelo redirecionamento de regresso à partida
+    (ver supercruise_assist.py/verificar_los_confirmada), que precisa do
+    MESMO tipo de onde se descolou, não do oposto que a deteção normal
+    escolheria. """
+    tipo_alvo = tipo_alvo_forcado or obter_alvo_contextual_log()
     label_alvo = "STATION" if tipo_alvo == "station" else "CARRIER"
 
     # Station tem duas variantes visuais (normal / _alt), cada uma com o seu threshold.

@@ -23,7 +23,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, leg_esta_limpa, print_ts as print
+from infra_bridge import pydirectinput, gw, winsound, mss, leg_esta_limpa, definir_proximo_step_forcado, print_ts as print
 import time
 
 # ==========================================
@@ -679,6 +679,49 @@ TAM_JANELA_ALINHAR = 700  # janela de debug quadrada -- a área capturada
 # alto) esticava horizontalmente e distorcia os círculos do HUD em
 # elipses, dificultando avaliar visualmente a posição real da bola/nariz.
 
+def _redirecionar_para_partida():
+    """ Chamado quando verificar_los_confirmada() devolve "confirmada"
+    (oclusão real, duas fontes independentes concordam) -- em vez de
+    continuar às cegas a tentar alinhar com um alvo genuinamente
+    bloqueado, muda o alvo de volta para o ponto de PARTIDA (não o
+    destino original) e deixa o loop de alinhamento já em curso convergir
+    para lá sozinho (o caso "alvo atrás" já existe em
+    aplicar_manobra_bussola, não precisa de manobra nova) -- este script
+    (SUPERCRUISE) e o DOCKING a seguir correm exatamente como sempre,
+    sem saber que houve redirecionamento nenhum. Se isso não chegar a
+    tempo, o retry automático de 3x que já existe em executar_script()
+    reinicia este script do zero -- como o alvo já ficou trocado no jogo
+    (é estado do nav computer, sobrevive a reiniciar o script), a próxima
+    tentativa já vai direta para o ponto de partida, "como se sempre
+    tivesse sido o alvo".
+
+    Marca (não consome já) qual o passo do vasco.py a seguir depois de
+    reatracar na partida (2=TARGET_CARRIER ou 7=SELECT_STATION) --
+    deliberadamente só depois do DOCKING seguinte terminar com sucesso
+    (ver consumir_proximo_step_forcado em vasco.py): se a nave não
+    conseguir mesmo voltar e atracar, a bandeira fica por consumir e cai
+    no tratamento de falha normal, em vez de saltar passos às cegas antes
+    de saber se o regresso resultou. Pedido do utilizador, 2026-09-16. """
+    import select_target
+
+    # obter_alvo_contextual_log() devolve sempre o OPOSTO de onde se
+    # descolou por último (é para onde o script normalmente iria) --
+    # invertido dá o tipo de onde se descolou, ou seja, a própria partida.
+    destino_normal = select_target.obter_alvo_contextual_log()
+    tipo_partida = "carrier" if destino_normal == "station" else "station"
+
+    print(f"[LOS] A redirecionar para a partida ({tipo_partida}) em vez do destino original ({destino_normal})...")
+    select_target.marcar_destino_dinamico(tipo_alvo_forcado=tipo_partida)
+
+    # TARGET_CARRIER (2) é o passo logo a seguir ao COMPRAR -- faz sentido
+    # quando a partida é a estação (saiu de lá com o porão já cheio,
+    # comprar.py vai saltar a compra sozinho -- ver obter_cargo_atual).
+    # SELECT_STATION (7) é o equivalente a seguir ao VENDER, quando a
+    # partida é o carrier (porão já vazio).
+    proximo_step = 2 if tipo_partida == "station" else 7
+    definir_proximo_step_forcado(proximo_step)
+    print(f"[LOS] Passo {proximo_step} marcado para depois de reatracar na partida.")
+
 def _alinhar_com_olho(nome_janela, limite_segundos=60.0):
     """ Loop de alinhamento reaproveitando a bússola do olho.py (já testada e
     calibrada por nave). Chamado sempre DEPOIS do Supercruise Assist estar
@@ -921,8 +964,26 @@ def _alinhar_com_olho(nome_janela, limite_segundos=60.0):
                 tempo_inicio_centrado = None
                 comando_display = "NAO_DETETADO"
                 olho.largar_todas_as_teclas()
-                olho.aplicar_roll_desocluir(
-                    "alinhamento pos-assist -- bussola NAO_DETETADO -- possivel sol/planeta a tapar")
+                # Antes de gastar um roll, verifica se o jogo já confirmou
+                # oclusão real (aviso explícito "MOVE TO OBTAIN LINE OF
+                # SIGHT TO TARGET") -- ver olho.verificar_los_confirmada().
+                # Este é o loop que corre DE VERDADE no pipeline automático
+                # (_alinhar_com_olho tem o seu próprio ciclo, não chama
+                # olho.executar()) -- sem este fix aqui, a deteção do aviso
+                # nunca dispararia em produção.
+                resultado_los = olho.verificar_los_confirmada(sct)
+                if resultado_los == "confirmada":
+                    _redirecionar_para_partida()
+                    # Não faz roll nem aborta -- deixa o loop continuar,
+                    # agora a convergir para o alvo novo (a partida).
+                elif resultado_los == "discrepancia":
+                    abortar_com_erro(
+                        "Aviso do jogo confirma oclusão, mas o modelo orbital (los_checker) NÃO prevê "
+                        "bloqueio agora -- discrepância real entre o modelo e o jogo. Intervenção manual necessária."
+                    )
+                elif not resultado_los:
+                    olho.aplicar_roll_desocluir(
+                        "alinhamento pos-assist -- bussola NAO_DETETADO -- possivel sol/planeta a tapar")
             else:
                 tempo_inicio_centrado = None
                 is_oca = cmd_bussola.startswith("OCA:")

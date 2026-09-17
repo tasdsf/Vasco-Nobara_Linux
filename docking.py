@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, ED_STATUS_FILE
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_STATUS_FILE, capturar_screenshot_erro
 import time
 
 if sys.platform == "win32":
@@ -58,6 +58,7 @@ def falar(texto):
 def abortar_com_erro(mensagem):
     print(f"\n[FATAL] {mensagem}")
     _logger.error(mensagem)
+    capturar_screenshot_erro(pasta_logs)
     tocar_alarme_erro()
     falar("Critical error during docking sequence. Manual intervention required.")
     # É ESTE sys.exit(1) QUE AVISA O VASCO.PY QUE HOUVE UMA FALHA!
@@ -481,8 +482,13 @@ def executar():
         print("[DOCKING] Telemetria (Status.json) reporta DOCKED -- nave já está pousada, a saltar pedido de docking.")
         return
 
-    print("Bot pronto. Inicia a aproximação em 1 segundos...")
-    time.sleep(1)
+    # 10s (subido de 1s, 2026-09-16) -- dar tempo à nave de se aproximar
+    # mais antes do primeiro pedido. Ver o guard de "Distance" em
+    # aguardar_confirmacao_docking(): esse já reage DEPOIS de um pedido
+    # cedo demais ser negado; este atraso evita o próprio pedido inicial
+    # ser cedo demais.
+    print("Bot pronto. Inicia a aproximação em 10 segundos...")
+    time.sleep(10)
     solicitar_docking()
 
     if VISUAL_DEBUG:

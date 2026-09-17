@@ -17,8 +17,9 @@ from pathlib import Path
 from infra_bridge import keyboard
 from los_checker import calcular_espera_los
 from infra_bridge import ED_LOG_DIR
-from infra_bridge import notificar_erro_discord
+from infra_bridge import notificar_erro_discord, notificar_discord
 from infra_bridge import reiniciar_leg_limpa, marcar_leg_suja
+from infra_bridge import consumir_proximo_step_forcado
 from infra_bridge import print_ts as print
 import time
 
@@ -204,6 +205,14 @@ def executar_script(script_name, retry_count=3, retry_delay=5, **_ignorado):
 
     return False, error_msg, "MAX_RETRIES"
 
+
+# Mensagens de abortar_com_erro() que indicam bloqueio por oclusão (planeta/
+# estrela a tapar o alvo) -- ver olho.py (timeout de manobra, geralmente por
+# ficar preso a tentar desocluir) e supercruise_assist.py (diagnóstico
+# explícito de salto falhado). Usado só para decidir SE se junta a previsão
+# do los_checker à notificação -- não muda o comportamento da falha em si.
+_MOTIVOS_OCLUSAO = ("obstruído por corpo celeste", "Bloqueio de timeout")
+
 def _notificar_falha_discord(script_name, error_msg):
     """ Notifica o Discord só quando uma etapa esgota TODOS os retries (não
     em cada tentativa individual -- isso inundava o canal). Único ponto de
@@ -213,12 +222,37 @@ def _notificar_falha_discord(script_name, error_msg):
     Anexa o screenshot de erro mais recente (logs/erro_*.png, gravado
     automaticamente por abortar_com_erro em supercruise_assist.py) se
     tiver menos de 30s -- só se for mesmo desta falha, não de uma
-    anterior. Best-effort: nunca pode impedir o vasco.py de continuar. """
+    anterior. Best-effort: nunca pode impedir o vasco.py de continuar.
+
+    Se a falha for por oclusão (ver _MOTIVOS_OCLUSAO), a mensagem ganha a
+    hora exata em que parou e a previsão do los_checker (calcular_espera_los)
+    de quando o alvo deve deixar de estar tapado -- pedido do utilizador
+    (2026-09-16): "quero uma mensagem a informar quando parou, quando
+    recomeça, etc". Nota: o vasco.py não retoma sozinho depois de esgotar
+    os retries -- fica à espera de escolha manual (prompt "FASSA
+    DETECTADA") -- por isso a previsão é só informativa (vale a pena olhar
+    de novo por volta dessa hora), não uma garantia de retoma automática. """
     try:
         pasta_logs = SCRIPT_DIR / "logs"
         candidatos = sorted(pasta_logs.glob("erro_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
         imagem_path = str(candidatos[0]) if candidatos and (time.time() - candidatos[0].stat().st_mtime) < 30 else None
-        notificar_erro_discord(script_name, error_msg, imagem_path)
+
+        if any(motivo in error_msg for motivo in _MOTIVOS_OCLUSAO):
+            agora = datetime.now().strftime('%H:%M:%S')
+            mensagem = f"Parou às {agora} (oclusão): {error_msg}"
+            try:
+                espera = calcular_espera_los(ed_log_dir=ED_LOG_DIR)
+                if espera and espera > 0:
+                    fim_espera = (datetime.now() + timedelta(seconds=espera)).strftime('%H:%M:%S')
+                    mensagem += f"\nPrevisão do LOS checker: livre por volta das {fim_espera}."
+                else:
+                    mensagem += "\nLOS checker não prevê bloqueio agora -- pode ser outra causa."
+            except Exception as e:
+                mensagem += f"\n(Previsão do LOS checker indisponível: {e})"
+            mensagem += "\nÀ espera de intervenção manual -- o vasco.py não retoma sozinho."
+            notificar_discord(script_name, mensagem, emoji="🪐", imagem_path=imagem_path)
+        else:
+            notificar_erro_discord(script_name, error_msg, imagem_path)
     except Exception as e:
         print(f"[AVISO] Falha ao notificar Discord: {e}")
 
@@ -284,8 +318,21 @@ def main():
                 if espera and espera > 0:
                     h, resto = divmod(int(espera), 3600)
                     m, s = divmod(resto, 60)
+                    agora = datetime.now().strftime('%H:%M:%S')
                     fim_espera = (datetime.now() + timedelta(seconds=espera)).strftime('%H:%M:%S')
                     print(f"[LOS] Planeta no meio. A aguardar {h}h {m}m {s}s... (livre por volta das {fim_espera})")
+                    # Esta espera é proativa (nada falhou) -- não passava por
+                    # _notificar_falha_discord, que só dispara em falhas
+                    # reais. Sem isto, uma espera longa (horas) ficava só na
+                    # consola, sem aviso nenhum no Discord. Pedido do
+                    # utilizador (2026-09-16).
+                    notificar_discord(
+                        step_info["script"],
+                        f"Parou às {agora} (LOS bloqueada, à espera pré-emptiva antes do UNDOCKING).\n"
+                        f"Duração prevista: {h}h {m}m {s}s -- livre por volta das {fim_espera}.\n"
+                        f"O vasco.py está a dormir -- retoma sozinho quando a espera acabar.",
+                        emoji="🪐",
+                    )
                     time.sleep(espera)
             
             success, error_msg, error_code = executar_script(
@@ -298,7 +345,22 @@ def main():
                 print(f"[SUCESSO] Etapa {step_info['name']} concluida!")
                 completed_steps.append(current_step)
                 save_state(current_step, success=True, completed_steps=completed_steps)
-                current_step += 1
+
+                # Redirecionamento por oclusão confirmada (ver
+                # supercruise_assist.py/_redirecionar_para_partida): só
+                # consumido aqui, depois do passo ATUAL ter terminado com
+                # sucesso -- se o SUPERCRUISE+DOCKING de regresso à
+                # partida não tivessem resultado, "success" seria False e
+                # a bandeira nunca seria lida (fica pendente, sem efeito,
+                # até ao próximo sucesso real). Pedido do utilizador,
+                # 2026-09-16.
+                passo_forcado = consumir_proximo_step_forcado()
+                if passo_forcado is not None:
+                    print(f"[VASCO] Redirecionamento por oclusão confirmado -- a saltar para o passo {passo_forcado} "
+                          f"em vez de {current_step + 1}.")
+                    current_step = passo_forcado
+                else:
+                    current_step += 1
             else:
                 # Falha - requer intervencao. Fica neste prompt em loop
                 # enquanto o "Retry manual" (escolha 1) continuar a falhar --

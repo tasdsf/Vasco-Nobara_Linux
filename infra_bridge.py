@@ -19,6 +19,8 @@ Exports públicos:
     KEYBOARD_BACKEND- string de diagnóstico do teclado
     notificar_erro_discord - envia um erro para o Discord (ver DISCORD_WEBHOOK_URL no .env)
     notificar_discord - versão genérica (emoji configurável -- sucesso, aviso, etc.)
+    capturar_screenshot_erro - grava o ecrã inteiro do jogo (logs/erro_*.png), para anexar ao Discord
+    definir_proximo_step_forcado / consumir_proximo_step_forcado - redirecionamento por oclusão (ver supercruise_assist.py)
 """
 
 import os
@@ -32,6 +34,7 @@ import builtins as _builtins
 import tempfile
 import threading
 import subprocess
+import cv2
 import numpy as np
 import subprocess as _subprocess
 
@@ -40,6 +43,34 @@ def print_ts(*args, **kwargs):
     """print com prefixo de timestamp [HH:MM:SS]. Ver nota nos exports."""
     ts = time.strftime("%H:%M:%S")
     _builtins.print(f"[{ts}]", *args, **kwargs)
+
+# =====================================================================
+# REDIRECIONAMENTO POR OCLUSÃO CONFIRMADA (LOS)
+# =====================================================================
+# vasco.py corre todas as etapas no mesmo processo (ver _obter_modulo em
+# vasco.py), por isso um global simples aqui é visível por todos os
+# scripts sem precisar de ficheiro/BD -- mesmo padrão do _leg_limpa mais
+# abaixo. Usado por supercruise_assist.py (_redirecionar_para_partida)
+# quando uma oclusão é confirmada por duas fontes independentes (aviso do
+# jogo + modelo orbital): muda o alvo para o ponto de partida e marca
+# aqui QUAL o próximo passo do vasco.py depois de reatracar lá (2 ou 7).
+# Não é lido/consumido logo -- só depois do SUPERCRUISE+DOCKING normais
+# terminarem com sucesso (a nave pode não conseguir voltar de facto; se
+# isso falhar, cai no tratamento de falha normal, a bandeira fica por
+# consumir e não tem efeito nenhum). Pedido do utilizador, 2026-09-16.
+_proximo_step_forcado = None
+
+def definir_proximo_step_forcado(step):
+    global _proximo_step_forcado
+    _proximo_step_forcado = step
+
+def consumir_proximo_step_forcado():
+    """ Devolve o passo forçado e limpa-o (side-effect: só pode ser
+    "gasto" uma vez). None se não houver nenhum pendente. """
+    global _proximo_step_forcado
+    step = _proximo_step_forcado
+    _proximo_step_forcado = None
+    return step
 
 # Tabela de scancodes Linux (input-event-codes.h)
 # CRÍTICO: ydotool usa scancode, não o carácter ASCII.
@@ -530,6 +561,33 @@ import mss  # noqa: E402 — re-importa o substituto
 
 SCREEN_BACKEND = "pipewire_kde"
 print(f"[BRIDGE] Screen backend: {SCREEN_BACKEND}")
+
+def capturar_screenshot_erro(pasta_logs):
+    """ Grava o ecrã inteiro do jogo no momento de um erro -- centralizado
+    aqui (antes só existia dentro do supercruise_assist.py) para que
+    QUALQUER abortar_com_erro() de qualquer script possa anexar sempre um
+    screenshot à notificação Discord, não só quando o erro calha a vir do
+    supercruise_assist.py (vasco.py._notificar_falha_discord só anexa se
+    existir um logs/erro_*.png com menos de 30s -- pedido do utilizador,
+    2026-09-16). Nunca pode impedir o abort -- corre num try/except que só
+    regista a falha e continua.
+
+    pasta_logs -- pasta "logs" do script chamador (todos os scripts deste
+                  projeto já têm essa variável, sempre a mesma pasta física
+                  já que vivem todos no mesmo diretório). """
+    try:
+        with mss.mss() as sct:
+            try: monitor_jogo = sct.monitors[1]
+            except Exception: monitor_jogo = sct.monitors[0]
+            img = cv2.cvtColor(np.array(sct.grab(monitor_jogo)), cv2.COLOR_BGRA2BGR)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        caminho = os.path.join(pasta_logs, f"erro_{timestamp}.png")
+        cv2.imwrite(caminho, img)
+        print(f"[FATAL] Screenshot do erro gravado em {caminho}")
+        return caminho
+    except Exception as e:
+        print(f"[AVISO] Falha ao gravar screenshot do erro: {e}")
+        return None
 
 # =====================================================================
 # 5. TECLADO — requer grupo 'input'

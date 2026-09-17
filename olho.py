@@ -10,7 +10,7 @@ import glob
 from collections import deque
 import sys
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, SCREEN_WIDTH, SCREEN_HEIGHT, print_ts as print
+from infra_bridge import pydirectinput, gw, winsound, mss, SCREEN_WIDTH, SCREEN_HEIGHT, capturar_screenshot_erro, print_ts as print
 
 
 if sys.platform == "win32":
@@ -29,7 +29,13 @@ else:
 diretorio_atual = os.path.dirname(os.path.abspath(__file__))
 pasta_logs = os.path.join(diretorio_atual, "logs")
 pasta_imagens = os.path.join(diretorio_atual, "images")
+# Pasta própria (não dentro de logs/) para os prints das confirmações reais
+# de oclusão (aviso "MOVE TO OBTAIN LINE OF SIGHT TO TARGET" detetado) --
+# pedido do utilizador (2026-09-16), separado do resto dos logs porque são
+# evidência do próprio fenómeno de LOS, não diagnóstico de erro de bot.
+pasta_los = os.path.join(diretorio_atual, "los")
 os.makedirs(pasta_logs, exist_ok=True)
+os.makedirs(pasta_los, exist_ok=True)
 
 # Logger proprio (nao usa logging.basicConfig -- com varios scripts no mesmo
 # processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
@@ -66,6 +72,7 @@ def abortar_com_erro(mensagem):
     largar_todas_as_teclas()
     print(f"\n[FATAL] {mensagem}")
     _logger.error(mensagem)
+    capturar_screenshot_erro(pasta_logs)
     tocar_alarme_erro()
     falar("Navigation error. Manual control required.")
     sys.exit(1)
@@ -160,6 +167,14 @@ MONITOR_HUD = {"top": 402, "left": 762, "width": 359, "height": 302}
 DEAD_ZONE_HUD = 15
 IMPULSO_HUD = 0.17
 
+# Aviso "MOVE TO OBTAIN LINE OF SIGHT TO TARGET" -- elemento de HUD fixo
+# (não calibrado por nave, ao contrário de MONITOR_HUD/MONITOR_CONFIG),
+# por isso região própria, generosa o suficiente para cobrir alguma
+# variação de posição sem depender da calibração da nave atual. Recortado
+# de images/line_of_sight.png (2026-09-16) -- primeira captura limpa deste
+# aviso, que antes só tínhamos visto fugazmente sem conseguir screenshot.
+MONITOR_LOS_AVISO = {"top": 390, "left": 750, "width": 500, "height": 90}
+
 historico_bola_x = deque(maxlen=5)
 historico_bola_y = deque(maxlen=5)
 
@@ -184,6 +199,10 @@ try:
     # fallback quando um planeta/corpo celeste tapa só o arco de cima.
     template_alvo_hud_low = cv2.imread(os.path.join(pasta_imagens, "target_low.png"), cv2.IMREAD_COLOR)
     if template_alvo_hud_low is None: raise FileNotFoundError("target_low.png ausente")
+    # Texto de aviso explícito do jogo para oclusão real -- ver
+    # MONITOR_LOS_AVISO e verificar_los_confirmada() mais abaixo.
+    template_los_aviso = cv2.imread(os.path.join(pasta_imagens, "MOVE_TO_OBTAIN_LOS.png"), cv2.IMREAD_COLOR)
+    if template_los_aviso is None: raise FileNotFoundError("MOVE_TO_OBTAIN_LOS.png ausente")
 except Exception as e:
     abortar_com_erro(f"Erro de I/O na imagem TARGET.png: {e}")
 
@@ -606,6 +625,84 @@ def aplicar_roll_desocluir(motivo="não especificado"):
                      f"duracao real do impulso: {duracao:.2f}s (esperado ~0.50s) -- cooldown {ROLL_DESOCLUIR_COOLDOWN}s")
     time.sleep(ROLL_DESOCLUIR_COOLDOWN)
 
+def verificar_los_confirmada(sct):
+    """ Procura o aviso explícito do jogo "MOVE TO OBTAIN LINE OF SIGHT TO
+    TARGET" -- ao contrário de NÃO_DETETADO/ALINHADO_MACRO (que só
+    suspeitam de oclusão por ausência de sinal), este é o próprio jogo a
+    confirmar. Quando aparece:
+      1. Grava o print em los/ (pasta própria, não logs/).
+      2. Regista no los_checker com origem="auto-linux" (corrigido
+         2026-09-16 -- "linux" fica reservado só para confirmação humana
+         interativa via los_calibrar.py, ver docstring de
+         registar_observacao). Fica de fora do auto-fit do modelo (mesmo
+         filtro que já existe para as observações automáticas de
+         supercruise bem-sucedido), mas ainda fica registado como
+         evidência/histórico.
+      3. Cruza com calcular_espera_los() e devolve o resultado -- não
+         decide a ação aqui, isso é responsabilidade do chamador (ver
+         supercruise_assist.py/_alinhar_com_olho, que trata os 3 casos).
+
+    Devolve:
+      False         -- aviso não detetado, o chamador segue o fluxo normal
+                        (aplicar_roll_desocluir).
+      "confirmada"   -- aviso detetado E o modelo orbital concorda (também
+                        prevê bloqueio) -- oclusão confirmada por duas
+                        fontes independentes. O chamador deve redirecionar
+                        para a partida, não continuar a tentar alinhar.
+      "discrepancia" -- aviso detetado mas o modelo orbital NÃO prevê
+                        bloqueio agora -- discrepância real entre o modelo
+                        e o jogo. O chamador deve abortar e pedir
+                        intervenção humana (não é seguro assumir nada). """
+    img_bgra = np.array(sct.grab(MONITOR_LOS_AVISO))
+    img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+    resultado = cv2.matchTemplate(img_bgr, template_los_aviso, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, _ = cv2.minMaxLoc(resultado)
+    if max_val < 0.80:
+        return False
+
+    print(f"[LOS] Aviso 'MOVE TO OBTAIN LINE OF SIGHT TO TARGET' confirmado (match={max_val:.3f}).")
+    _logger.warning(f"Aviso de LOS confirmado pelo jogo (match={max_val:.3f}).")
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    caminho_print = os.path.join(pasta_los, f"los_confirmado_{timestamp}.png")
+    try:
+        with mss.mss() as sct2:
+            monitor_jogo = sct2.monitors[1] if len(sct2.monitors) > 1 else sct2.monitors[0]
+            img_completa = cv2.cvtColor(np.array(sct2.grab(monitor_jogo)), cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(caminho_print, img_completa)
+        print(f"[LOS] Print gravado em {caminho_print}")
+    except Exception as e:
+        print(f"[AVISO] Falha ao gravar print da confirmação de LOS: {e}")
+
+    from infra_bridge import ED_LOG_DIR
+    from los_checker import obter_sistema_atual, registar_observacao, calcular_espera_los
+    sistema = obter_sistema_atual(ED_LOG_DIR)
+    if sistema:
+        try:
+            registar_observacao(
+                sistema, "oclusos",
+                nota="automatica: aviso explicito do jogo 'MOVE TO OBTAIN LINE OF SIGHT TO TARGET' confirmado por template match",
+                origem="auto-linux",
+            )
+        except Exception as e:
+            print(f"[AVISO] Falha ao registar observação no los_checker: {e}")
+    else:
+        print("[AVISO] Sistema atual desconhecido -- observação não registada.")
+
+    espera_modelo = 0.0
+    try:
+        espera_modelo = calcular_espera_los(ed_log_dir=ED_LOG_DIR) or 0.0
+    except Exception as e:
+        print(f"[AVISO] Falha ao consultar calcular_espera_los: {e}")
+
+    if espera_modelo > 0:
+        print(f"[LOS] Modelo orbital concorda (~{int(espera_modelo)}s previstos) -- "
+              f"oclusão confirmada por duas fontes independentes.")
+        return "confirmada"
+    else:
+        print("[LOS] Modelo orbital NÃO prevê bloqueio -- discrepância entre o modelo e o jogo.")
+        return "discrepancia"
+
 # ==========================================
 # 5. EXECUÇÃO PRINCIPAL
 # ==========================================
@@ -685,10 +782,23 @@ def executar():
                         elif time.time() - tempo_cego > LIMITE_CEGO:
                             abortar_com_erro("Perda prolongada de telemetria visual da bússola.")
                         largar_todas_as_teclas()
-                        # Muitas vezes a falha é o sol/planeta a tapar o HUD --
-                        # um pequeno impulso de roll (não muda o rumo, só a
-                        # orientação) pode desocluir a vista.
-                        aplicar_roll_desocluir(f"bussola NAO_DETETADO ha {time.time()-tempo_cego:.1f}s -- possivel sol/planeta a tapar")
+                        # Antes de assumir "pode ser só um glitch" e gastar um
+                        # roll, verifica se o jogo já confirmou oclusão real
+                        # (aviso explícito). Execução standalone (este
+                        # executar(), não o pipeline automático -- ver
+                        # supercruise_assist.py para o redirecionamento
+                        # real) -- aqui não há orquestrador para
+                        # redirecionar, por isso só aborta.
+                        resultado_los = verificar_los_confirmada(sct)
+                        if resultado_los == "confirmada":
+                            abortar_com_erro("Oclusão confirmada por duas fontes (aviso do jogo + modelo orbital).")
+                        elif resultado_los == "discrepancia":
+                            abortar_com_erro("Aviso do jogo confirma oclusão mas o modelo orbital discorda.")
+                        elif not resultado_los:
+                            # Muitas vezes a falha é o sol/planeta a tapar o HUD --
+                            # um pequeno impulso de roll (não muda o rumo, só a
+                            # orientação) pode desocluir a vista.
+                            aplicar_roll_desocluir(f"bussola NAO_DETETADO ha {time.time()-tempo_cego:.1f}s -- possivel sol/planeta a tapar")
                     elif cmd_bussola == "ALINHADO_MACRO":
                         # A bússola diz que o nariz já aponta ao alvo mas o HUD
                         # não confirma nenhum dos dois arcos do retículo --
@@ -700,7 +810,13 @@ def executar():
                         tempo_cego = None
                         comando_display = "MACRO: ALINHADO_MACRO (HUD tapado -- a rodar)"
                         largar_todas_as_teclas()
-                        aplicar_roll_desocluir(f"ALINHADO_MACRO mas HUD nao confirma reticulo (bola a dx={dist_x} dy={dist_y} do centro) -- possivel oclusao do reticulo")
+                        resultado_los = verificar_los_confirmada(sct)
+                        if resultado_los == "confirmada":
+                            abortar_com_erro("Oclusão confirmada por duas fontes (aviso do jogo + modelo orbital).")
+                        elif resultado_los == "discrepancia":
+                            abortar_com_erro("Aviso do jogo confirma oclusão mas o modelo orbital discorda.")
+                        elif not resultado_los:
+                            aplicar_roll_desocluir(f"ALINHADO_MACRO mas HUD nao confirma reticulo (bola a dx={dist_x} dy={dist_y} do centro) -- possivel oclusao do reticulo")
                     else:
                         tempo_cego = None
                         # Pré-roll: só faz sentido com uma direção real já

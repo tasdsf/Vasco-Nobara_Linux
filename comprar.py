@@ -6,7 +6,7 @@ import json
 import logging
 import cv2
 import numpy as np
-from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR, ED_STATUS_FILE
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR, ED_STATUS_FILE, capturar_screenshot_erro
 import time
 
 if sys.platform == "win32":
@@ -45,6 +45,7 @@ def abortar_com_erro(mensagem):
     """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
     print(f"\n[FATAL] {mensagem}")
     _logger.error(mensagem)
+    capturar_screenshot_erro(pasta_logs)  # antes do backspace, para gravar o ecrã real do erro
     for _ in range(3):
         pydirectinput.press('backspace')
         time.sleep(0.8)
@@ -352,8 +353,29 @@ def fase_3_comprar_item():
         if procurar_template(templates['rare_on'], "RARE FOUND", MONITOR_MARKET, 0.80):
             print(">>> ITEM DETETADO! Comprando...")
             _logger.info("Detetou o item (Fujin Tea / Kamitra Cigars) no mercado.")
-            pydirectinput.press('space')
-            time.sleep(1.0)
+
+            # O 'space' abre o ecrã de quantidade/detalhe do item -- confirma
+            # que teve efeito manifesto (a lista deixou de estar visível)
+            # antes de avançar para o hold do 'd', em vez de assumir sempre
+            # que resultou com um único 'space' + sleep fixo. Mesma família
+            # do bug "Botão BUY não ficou focado": se este 'space' inicial
+            # não tiver efeito, o resto do fluxo continua às cegas no ecrã
+            # errado (ainda a lista) e nunca vai encontrar o botão BUY.
+            # Confirmado em produção (2026-09-16). Até 3 tentativas.
+            ecra_seguinte_confirmado = False
+            for _tentativa_space in range(3):
+                pydirectinput.press('space')
+                time.sleep(1.0)
+                if not procurar_template(templates['rare_on'], "RARE FOUND (ainda na lista?)", MONITOR_MARKET, 0.80):
+                    ecra_seguinte_confirmado = True
+                    break
+                print(f"[AVISO] 'space' não mudou de ecrã (ainda na lista, tentativa "
+                      f"{_tentativa_space + 1}/3) -- a repetir...")
+
+            if not ecra_seguinte_confirmado:
+                abortar_com_erro("O 'space' para abrir o ecrã de quantidade do item não teve efeito "
+                                  "confirmado após 3 tentativas -- continua na lista. Intervenção manual necessária.")
+
             pydirectinput.keyDown('d')
             time.sleep(2.5)
             pydirectinput.keyUp('d')

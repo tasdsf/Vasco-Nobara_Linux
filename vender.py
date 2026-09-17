@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR, ED_STATUS_FILE, notificar_discord
+from infra_bridge import pydirectinput, gw, winsound, mss, ED_LOG_DIR, ED_STATUS_FILE, notificar_discord, capturar_screenshot_erro
 import time
 
 # ==========================================
@@ -41,6 +41,7 @@ def abortar_com_erro(mensagem):
     """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
     print(f"\n[FATAL] {mensagem}")
     _logger.error(mensagem)
+    capturar_screenshot_erro(pasta_logs)
     sys.exit(1)
 
 NOME_JANELA = "Ocular do Bot - Analise Carrier"
@@ -445,9 +446,10 @@ def executar():
     time.sleep(3)
 
     # Se a venda não for confirmada pelo journal, volta ao menu da nave e
-    # tenta o processo completo de novo -- padrão standard de 3 tentativas,
-    # pedindo intervenção manual (via abortar_com_erro) se todas falharem.
-    for tentativa in range(3):
+    # tenta o processo completo de novo -- 6 tentativas (subido de 3,
+    # 2026-09-16) antes de pedir intervenção manual (via abortar_com_erro)
+    # -- só reporta erro ao vasco.py à 6ª falha, não à 3ª.
+    for tentativa in range(6):
         if fase_1_abrir_mercado():
             resultado = fase_2_vender_tudo()
             if resultado in ("VENDIDO", "VAZIO"):
@@ -463,15 +465,15 @@ def executar():
                     return
                 print(f"[AVISO] fase_2_vender_tudo devolveu '{resultado}' mas o porão "
                       f"(Cargo.json) ainda tem {cargo_restante} unidades -- não sai daqui "
-                      f"com stock por vender (tentativa {tentativa + 1}/3). A tentar de novo...")
+                      f"com stock por vender (tentativa {tentativa + 1}/6). A tentar de novo...")
                 time.sleep(2.0)
                 continue
 
-            print(f"[AVISO] Venda não confirmada pelo journal (tentativa {tentativa + 1}/3). "
+            print(f"[AVISO] Venda não confirmada pelo journal (tentativa {tentativa + 1}/6). "
                   f"A voltar ao menu da nave e tentar de novo...")
             time.sleep(2.0)
 
-    abortar_com_erro("Venda não confirmada pelo journal após 3 tentativas completas.")
+    abortar_com_erro("Venda não confirmada pelo journal após 6 tentativas completas.")
 
 if __name__ == "__main__":
     executar()

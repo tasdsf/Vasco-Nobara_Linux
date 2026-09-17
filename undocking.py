@@ -7,7 +7,7 @@ import logging
 import cv2
 import numpy as np
 import pyttsx3
-from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print, ED_LOG_DIR, ED_STATUS_FILE
+from infra_bridge import pydirectinput, gw, winsound, mss, print_ts as print, ED_LOG_DIR, ED_STATUS_FILE, capturar_screenshot_erro
 import time
 
 # ==========================================
@@ -51,6 +51,7 @@ def abortar_com_erro(mensagem):
     """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
     print(f"\n[FATAL] {mensagem}")
     _logger.error(mensagem)
+    capturar_screenshot_erro(pasta_logs)
     sys.exit(1)
 
 NOME_JANELA = "R2D2 - Ocular de Auditoria"
