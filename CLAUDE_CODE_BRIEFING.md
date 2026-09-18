@@ -98,6 +98,16 @@ de ambiente (`.env`, nunca commitado): `R2D2_DB_HOST`, `R2D2_DB_PORT`,
   `debug/calc_periodo_orbital.py` (cálculo dos períodos orbitais usados em
   `los_checker.py`, antes mal-nomeado como `import math`).
 
+## Trabalho pendente
+
+- **Leitura da distância no HUD (`git stash`)** — há um `git stash` com uma
+  versão de `docking.py`/`supercruise_assist.py` para aproximação
+  controlada por leitura de dígitos do HUD, ainda não commitada por dois
+  problemas confirmados por resolver (posição dinâmica da etiqueta,
+  contaminação por fundo colorido). Ver `NOTA_STASH_LEITURA_DISTANCIA.md`
+  antes de aplicar (`git stash pop`) ou de mexer em
+  `debug/coletar_digitos_hud.py` / `images/digitos_hud/`.
+
 ## Regras de trabalho
 
 - Nunca reintroduzir lógica win32 (`sys.platform == "win32"`) — o projeto
